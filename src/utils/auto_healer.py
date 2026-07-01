@@ -1,15 +1,13 @@
 import sys
 import traceback
 import os
-from google import genai
-from google.genai import types
+from groq import Groq
 from github import Github
-from src.config.settings import settings
 
-# Naya Google Gen AI SDK client initialize kar rahe hain safely
-# Yeh automatic environment variable 'GEMINI_API_KEY' se token utha leta hai
+# Groq Client initialize kar rahe hain safely
+# Yeh automatic environment variable 'GROQ_API_KEY' se token utha leta hai
 try:
-    client = genai.Client()
+    client = Groq()
 except Exception as e:
     print(f"Auto-Healer Initialization Error: {e}")
     client = None
@@ -31,7 +29,7 @@ def commit_code_to_github(file_path: str, new_content: str):
         
         repo.update_file(
             path=file_path,
-            message="🤖 AI Auto-Heal: Upgraded to latest Google Gen AI SDK and fixed code runtime",
+            message="🤖 AI Auto-Heal: Upgraded to Groq API & Fixed runtime crash",
             content=new_content,
             sha=contents.sha,
             branch="main"
@@ -41,7 +39,7 @@ def commit_code_to_github(file_path: str, new_content: str):
         print(f"GitHub API push failed: {e}")
 
 def ai_autonomous_healer(exc_type, exc_value, exc_traceback):
-    """Jab bhi bot crash hone lagega, yeh dimaag lagayega"""
+    """Groq API ka use karke bot khud ko theek karega"""
     if issubclass(exc_type, KeyboardInterrupt) or client is None:
         sys.__excepthook__(exc_type, exc_value, exc_traceback)
         return
@@ -76,12 +74,17 @@ def ai_autonomous_healer(exc_type, exc_value, exc_traceback):
     """
 
     try:
-        # Naye SDK me 'gemini-2.5-flash' ya 'gemini-2.5-pro' models use hote hain
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt,
+        # Groq par llama3-8b-8192 model use kar rahe hain jo fast aur accurate hai
+        chat_completion = client.chat.completions.create(
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
+            model="llama3-8b-8192",
         )
-        fixed_code = response.text
+        fixed_code = chat_completion.choices[0].message.content
         
         if fixed_code.startswith("```"):
             fixed_code = "\n".join(fixed_code.split("\n")[1:-1])
