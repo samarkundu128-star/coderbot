@@ -1,4 +1,4 @@
-```dockerfile
+dockerfile
 FROM python:3.12-slim-bookworm
 
 # System parameters configure karte hain taaki python logs real-time me Render console par dikhein
@@ -24,5 +24,3 @@ COPY . .
 EXPOSE 10000
 
 CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "10000"]
-
-```
