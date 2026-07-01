@@ -1,4 +1,3 @@
-python
 from telegram import Update, constants
 from telegram.ext import CallbackContext
 from src.database.connection import AsyncSessionLocal
@@ -53,10 +52,10 @@ async def newproject_command(update: Update, context: CallbackContext) -> None:
     if not context.args:
         await update.effective_chat.send_message(text="❌ **Usage:** `/newproject <project_name>`")
         return
-        
+
     project_name = " ".join(context.args)
     tg_id = update.effective_user.id
-    
+
     async with AsyncSessionLocal() as session:
         proj_repo = ProjectRepository(session)
         project = await proj_repo.create_project(telegram_id=tg_id, name=project_name)
@@ -66,4 +65,3 @@ async def newproject_command(update: Update, context: CallbackContext) -> None:
     await update.effective_chat.send_message(
         text=f"📂 **Project Active:** Naya project `{project_name}` (ID: `{p_id}`) database me allocate ho chuka hai!"
     )
-          
