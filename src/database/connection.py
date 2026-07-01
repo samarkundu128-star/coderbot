@@ -1,4 +1,4 @@
-```python
+python
 import sys
 from typing import AsyncGenerator
 import structlog
@@ -43,5 +43,3 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
             raise DatabaseTransactionError(f"Database task failed: {str(transaction_exc)}")
         finally:
             await session.close() # Session band ho jayegi taaki leak na ho
-
-```
