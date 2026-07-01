@@ -1,5 +1,5 @@
-
 from typing import List, Optional
+import datetime # Yeh line add ki gayi hai
 from sqlalchemy import BigInteger, String, DateTime, ForeignKey, Text, JSON, Boolean
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
@@ -83,5 +83,3 @@ class UsageStatistic(Base):
     last_request_time: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     user: Mapped["User"] = relationship(back_populates="stats")
-
-  
