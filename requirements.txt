@@ -12,3 +12,4 @@ google-generativeai==0.7.1
 python-dotenv==1.0.1
 structlog==24.4.0
 certifi==2024.7.4
+
