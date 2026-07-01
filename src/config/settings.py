@@ -2,11 +2,11 @@ from pydantic_settings import BaseSettings
 from pydantic import field_validator
 
 class Settings(BaseSettings):
-    # --- Yahan aapki baaki saari fields pehle se hongi, unhe rehne dena ---
+    # --- Aapki core system requirements ---
     DATABASE_URL: str
     
-    # Humne yahan GEMINI_API_KEY ko jod diya hai
-    GEMINI_API_KEY: str
+    # Humne Gemini hata kar yahan GROQ_API_KEY ko properly jod diya hai
+    GROQ_API_KEY: str
 
     @field_validator("DATABASE_URL", mode="before")
     @classmethod
@@ -25,6 +25,6 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = ".env"
-        extra = "ignore" # Isse agar koi extra variable Render par hoga toh error nahi aayega
+        extra = "ignore" # Isse extra variables se crash nahi hoga
 
 settings = Settings()
