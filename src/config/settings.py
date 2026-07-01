@@ -2,8 +2,11 @@ from pydantic_settings import BaseSettings
 from pydantic import field_validator
 
 class Settings(BaseSettings):
-    # Aapki baaki saari fields yahan hongi...
+    # --- Yahan aapki baaki saari fields pehle se hongi, unhe rehne dena ---
     DATABASE_URL: str
+    
+    # Humne yahan GEMINI_API_KEY ko jod diya hai
+    GEMINI_API_KEY: str
 
     @field_validator("DATABASE_URL", mode="before")
     @classmethod
@@ -19,5 +22,9 @@ class Settings(BaseSettings):
         elif "postgresql+psycopg2://" in v:
             v = v.replace("postgresql+psycopg2://", "postgresql+asyncpg://", 1)
         return v
+
+    class Config:
+        env_file = ".env"
+        extra = "ignore" # Isse agar koi extra variable Render par hoga toh error nahi aayega
 
 settings = Settings()
