@@ -1,4 +1,3 @@
-
 import sys
 from typing import AsyncGenerator
 import structlog
@@ -12,7 +11,7 @@ logger = structlog.get_logger(__name__)
 try:
     # Supabase PostgreSQL se asynchronous engine connect kar rahe hain
     engine = create_async_engine(
-        settings.DATABASE_URL.get_secret_value(),
+        settings.DATABASE_URL,   # <--- .get_secret_value() ko mita diya hai
         pool_pre_ping=True,      # Connection check karne ke liye ping bhejna
         pool_size=20,            # Maximum active connections
         max_overflow=10,         # Extra connections limits
