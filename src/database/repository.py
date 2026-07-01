@@ -1,4 +1,4 @@
-```python
+python
 from typing import List, Optional, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -88,6 +88,4 @@ class ProjectRepository(BaseRepository):
         self.session.add(gen_file)
         await self.session.flush()
         return gen_file
-
-```
           
