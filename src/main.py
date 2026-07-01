@@ -34,16 +34,16 @@ async def lifespan(app: FastAPI):
         telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, core_message_handler))
 
         await telegram_app.initialize()
-        
+
         webhook_target = f"{settings.WEBHOOK_URL}/webhook"
         logger.info("Connecting Telegram Webhook...", url=webhook_target)
-        
+
         await telegram_app.bot.set_webhook(
             url=webhook_target,
             secret_token=settings.WEBHOOK_SECRET_TOKEN.get_secret_value()
         )
         logger.info("Telegram Webhook connection online successfully!")
-        
+
         yield
     except Exception as init_error:
         logger.critical("Lifespan startup engine failed to initialize!", error=str(init_error))
@@ -67,7 +67,7 @@ async def health_check():
 @app.post("/webhook")
 async def webhook_handler(request: Request, x_telegram_bot_api_secret_token: str = Header(None)):
     secret = settings.WEBHOOK_SECRET_TOKEN.get_secret_value()
-    
+
     if x_telegram_bot_api_secret_token != secret:
         logger.warning("Unverified request blocked! Token mismatch.")
         return Response(status_code=status.HTTP_403_FORBIDDEN)
