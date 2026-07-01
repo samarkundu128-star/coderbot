@@ -1,4 +1,4 @@
-```yaml
+yaml
 services:
   - type: web
     name: telegram-ai-coder-bot
@@ -25,5 +25,3 @@ services:
         sync: false
       - key: GEMINI_API_KEY
         sync: false
-
-```
