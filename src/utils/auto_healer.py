@@ -4,21 +4,16 @@ import os
 from groq import Groq
 from github import Github
 
-# Groq Client ko safely clean tarike se initialize kar rahe hain
-# Isse 'proxies' wala unexpected keyword argument error nahi aayega
+# Groq Client initialize kar rahe hain safely
 try:
     groq_api_key = os.getenv("GROQ_API_KEY")
-    if groq_api_key:
-        client = Groq(api_key=groq_api_key)
-    else:
-        print("Auto-Healer Error: GROQ_API_KEY environment variable nahi mila!")
-        client = None
+    client = Groq(api_key=groq_api_key) if groq_api_key else None
 except Exception as e:
     print(f"Auto-Healer Initialization Error: {e}")
     client = None
 
-def commit_code_to_github(file_path: str, new_content: str):
-    """Bot khud decision lekar GitHub par code push karega"""
+def commit_to_github_and_trigger(file_path: str, new_content: str):
+    """GitHub par push karega jisse Render par automatic deploy trigger ho jayega"""
     try:
         token = os.getenv("GITHUB_TOKEN")
         repo_name = os.getenv("REPO_NAME")
@@ -29,28 +24,26 @@ def commit_code_to_github(file_path: str, new_content: str):
 
         g = Github(token)
         repo = g.get_repo(repo_name)
-
         contents = repo.get_contents(file_path, ref="main")
 
         repo.update_file(
             path=file_path,
-            message="🤖 AI Auto-Heal: Upgraded to Groq API & Fixed runtime crash",
+            message="🤖 AI Auto-Heal: Fixed bug & triggered auto-redeploy",
             content=new_content,
             sha=contents.sha,
             branch="main"
         )
-        print(f"GitHub par {file_path} safely modify ho gayi hai!")
+        print(f"🚀 Code GitHub par push ho gaya! Deployment automatically shuru ho raha hai...")
     except Exception as e:
         print(f"GitHub API push failed: {e}")
 
 def ai_autonomous_healer(exc_type, exc_value, exc_traceback):
-    """Groq API ka use karke bot khud ko theek karega"""
     if issubclass(exc_type, KeyboardInterrupt) or client is None:
         sys.__excepthook__(exc_type, exc_value, exc_traceback)
         return
 
     error_msg = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
-
+    
     tb = exc_traceback
     while tb.tb_next:
         tb = tb.tb_next
@@ -79,14 +72,8 @@ def ai_autonomous_healer(exc_type, exc_value, exc_traceback):
     """
 
     try:
-        # Groq par llama3-8b-8192 model use kar rahe hain jo fast aur accurate hai
         chat_completion = client.chat.completions.create(
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
+            messages=[{"role": "user", "content": prompt}],
             model="llama3-8b-8192",
         )
         fixed_code = chat_completion.choices[0].message.content
@@ -94,12 +81,13 @@ def ai_autonomous_healer(exc_type, exc_value, exc_traceback):
         if fixed_code.startswith("```"):
             fixed_code = "\n".join(fixed_code.split("\n")[1:-1])
 
-        commit_code_to_github(relative_path, fixed_code.strip())
+        # GitHub par sahi code bhejो, bakki kaam pipeline khud karegi
+        commit_to_github_and_trigger(relative_path, fixed_code.strip())
+
     except Exception as ai_err:
         print(f"Autonomous healer failed: {ai_err}")
 
     sys.__excepthook__(exc_type, exc_value, exc_traceback)
 
 def setup_auto_healer():
-    """Isko main.py me initialize karenge"""
     sys.excepthook = ai_autonomous_healer
