@@ -1,4 +1,4 @@
-```python
+python
 import structlog
 from telegram import Update, constants
 from telegram.ext import CallbackContext
@@ -87,5 +87,3 @@ async def do_command_handler(update: Update, context: CallbackContext) -> None:
         return
     prompt = " ".join(context.args)
     await process_ai_request(update, context, prompt)
-
-```
