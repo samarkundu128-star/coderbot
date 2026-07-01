@@ -1,4 +1,4 @@
-```python
+python
 from telegram import Update, constants
 from telegram.ext import CallbackContext
 from src.database.connection import AsyncSessionLocal
@@ -66,6 +66,4 @@ async def newproject_command(update: Update, context: CallbackContext) -> None:
     await update.effective_chat.send_message(
         text=f"📂 **Project Active:** Naya project `{project_name}` (ID: `{p_id}`) database me allocate ho chuka hai!"
     )
-
-```
           
