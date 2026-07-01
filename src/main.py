@@ -1,3 +1,5 @@
+from src.utils.auto_healer import setup_auto_healer
+
 # --- SABSE PEHLE AUTO HEALER INITIALIZE HOGA ---
 import sys
 try:
