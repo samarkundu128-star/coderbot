@@ -85,5 +85,4 @@ class UsageStatistic(Base):
 
     user: Mapped["User"] = relationship(back_populates="stats")
 
-```
   
