@@ -1,4 +1,3 @@
-python
 import structlog
 from telegram import Update, constants
 from telegram.ext import CallbackContext
@@ -16,18 +15,18 @@ async def process_ai_request(update: Update, context: CallbackContext, prompt: s
     """
     chat_id = update.effective_chat.id
     tg_id = update.effective_user.id
-    
+
     # Telegram typing indicator show karenge jab tak response aa raha hai
     await context.bot.send_chat_action(chat_id=chat_id, action=constants.ChatAction.TYPING)
-    
+
     async with AsyncSessionLocal() as session:
         chat_repo = ChatRepository(session)
         proj_repo = ProjectRepository(session)
-        
+
         # Purani conversation history context ke liye fetch karte hain
         raw_history = await chat_repo.get_history(chat_id, limit=10)
         formatted_history = [{"role": h.role, "content": h.content} for h in raw_history]
-        
+
         try:
             # AI engine se output request kar rahe hain
             response_payload = await ai_engine.generate_solution(prompt, formatted_history)
@@ -35,14 +34,14 @@ async def process_ai_request(update: Update, context: CallbackContext, prompt: s
             logger.error("AI engine call failed!", error=str(e))
             await update.effective_chat.send_message(text=f"❌ **Error:** Processing me dikkat aayi: {str(e)}")
             return
-        
+
         files = response_payload.get("files", [])
         commentary = response_payload.get("commentary", "Request successfully processed.")
-        
+
         # Conversation history update kar rahe hain
         await chat_repo.add_history(chat_id, "user", prompt)
         await chat_repo.add_history(chat_id, "assistant", commentary)
-        
+
         # Agar user ka naya project space set hai toh files automatically wahan save hongi
         user_projects = await proj_repo.get_user_projects(tg_id)
         if user_projects and files:
