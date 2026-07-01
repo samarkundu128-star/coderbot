@@ -8,10 +8,28 @@ from src.errors.handlers import DatabaseTransactionError
 # Logging setup kar rahe hain errors track karne ke liye
 logger = structlog.get_logger(__name__)
 
+# --- AUTOMATIC DATABASE URL PROTOCOL FIXER ---
+raw_url = settings.DATABASE_URL
+
+# Agar settings se normal string na mile (Pydantic SecretStr ho)
+if hasattr(raw_url, "get_secret_value"):
+    raw_url = raw_url.get_secret_value()
+
+# Protocol ko ensure karein ki sirf asyncpg driver hi use ho
+if raw_url.startswith("postgres://"):
+    db_url = raw_url.replace("postgres://", "postgresql+asyncpg://", 1)
+elif raw_url.startswith("postgresql://"):
+    db_url = raw_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+elif "postgresql+psycopg2://" in raw_url:
+    db_url = raw_url.replace("postgresql+psycopg2://", "postgresql+asyncpg://", 1)
+else:
+    db_url = raw_url
+# ---------------------------------------------
+
 try:
     # Supabase PostgreSQL se asynchronous engine connect kar rahe hain
     engine = create_async_engine(
-        settings.DATABASE_URL,   # <--- .get_secret_value() ko mita diya hai
+        db_url,                  # Fixed dynamic async URL use kar rahe hain
         pool_pre_ping=True,      # Connection check karne ke liye ping bhejna
         pool_size=20,            # Maximum active connections
         max_overflow=10,         # Extra connections limits
