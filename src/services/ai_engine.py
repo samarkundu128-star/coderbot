@@ -1,4 +1,3 @@
-python
 import json
 import structlog
 import google.generativeai as genai
