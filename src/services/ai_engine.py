@@ -1,4 +1,4 @@
-```python
+python
 import json
 import structlog
 import google.generativeai as genai
@@ -73,6 +73,4 @@ class AICodingEngine:
         except Exception:
             pass
         return {"files": [], "commentary": text}
-
-```
       
