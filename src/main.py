@@ -1,13 +1,11 @@
-from src.utils.auto_healer import setup_auto_healer
-
 # --- SABSE PEHLE AUTO HEALER INITIALIZE HOGA ---
 import sys
 try:
     from src.utils.auto_healer import setup_auto_healer
     setup_auto_healer()
+    print("✅ AI Auto-Healer successfully initialize ho gaya hai!")
 except Exception as e:
-    # Agar abhi auto_healer file nahi bani, toh bot normally chalega
-    pass
+    print(f"⚠️ Auto-Healer initialize nahi ho paya (Ya file missing hai): {e}")
 # -----------------------------------------------
 
 import uvicorn
@@ -81,7 +79,7 @@ async def webhook_handler(request: Request, x_telegram_bot_api_secret_token: str
 
     if x_telegram_bot_api_secret_token != secret:
         logger.warning("Unverified request blocked! Token mismatch.")
-        return Response(status_code=status.HTTP_403_FORBIDDEN)
+        return Response(status_code=status.HTTP_403_FORBIDGEN)
 
     try:
         payload = await request.json()
