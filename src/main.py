@@ -1,4 +1,13 @@
+# --- SABSE PEHLE AUTO HEALER INITIALIZE HOGA ---
 import sys
+try:
+    from src.utils.auto_healer import setup_auto_healer
+    setup_auto_healer()
+except Exception as e:
+    # Agar abhi auto_healer file nahi bani, toh bot normally chalega
+    pass
+# -----------------------------------------------
+
 import uvicorn
 import structlog
 from contextlib import asynccontextmanager
