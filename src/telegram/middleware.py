@@ -1,4 +1,4 @@
-```python
+python
 import time
 from collections import defaultdict
 from telegram import Update
@@ -66,4 +66,3 @@ class TelegramMiddlewareEngine:
             await session.commit()
         return True
 
-```
