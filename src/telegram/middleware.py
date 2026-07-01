@@ -1,4 +1,3 @@
-python
 import time
 from collections import defaultdict
 from telegram import Update
@@ -27,21 +26,21 @@ class TelegramMiddlewareEngine:
         # Sliding window algorithm for rate limiting
         user_timestamps = rate_limit_store[tg_id]
         rate_limit_store[tg_id] = [t for t in user_timestamps if current_time - t < RATE_LIMIT_WINDOW]
-        
+
         if len(rate_limit_store[tg_id]) >= MAX_REQUESTS_PER_WINDOW:
             await context.bot.send_message(
                 chat_id=chat_id,
                 text="⚠️ **Rate Limit Active:** Aap boht jaldi commands bhej rahe hain. Kripya thodi der ruk kar try karein!"
             )
             return False
-        
+
         rate_limit_store[tg_id].append(current_time)
 
         # Database automatic onboarding (Naye users ko automatic database me add karna)
         async with AsyncSessionLocal() as session:
             user_repo = UserRepository(session)
             chat_repo = ChatRepository(session)
-            
+
             user = await user_repo.get_by_id(tg_id)
             if not user:
                 user = await user_repo.create_user(
@@ -51,7 +50,7 @@ class TelegramMiddlewareEngine:
                     username=update.effective_user.username
                 )
                 logger.info("Naya user database me automatically register ho gaya!", telegram_id=tg_id)
-            
+
             if user.is_banned:
                 await context.bot.send_message(
                     chat_id=chat_id, 
@@ -62,7 +61,6 @@ class TelegramMiddlewareEngine:
             chat = await chat_repo.get_by_id(chat_id)
             if not chat:
                 await chat_repo.create_chat(chat_id=chat_id, telegram_id=tg_id)
-            
+
             await session.commit()
         return True
-
