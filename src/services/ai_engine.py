@@ -1,6 +1,7 @@
 import json
 import structlog
-import google.generativeai as genai
+import os
+from groq import Groq
 from typing import List, Dict, Any
 from src.config.settings import settings
 from src.errors.handlers import AIServiceException
@@ -10,16 +11,25 @@ logger = structlog.get_logger(__name__)
 class AICodingEngine:
     def __init__(self):
         try:
-            # Gemini client ko configure kiya ja raha hai
-            genai.configure(api_key=settings.GEMINI_API_KEY.get_secret_value())
-            # Hum production-ready speed aur accuracy ke liye gemini-2.5-flash-preview-09-2025 use karenge
-            self.model = genai.GenerativeModel("gemini-2.5-flash-preview-09-2025")
+            # Groq client ko initialize kiya ja raha hai safely
+            # Agar settings me GROQ_API_KEY hai toh use karenge, nahi toh env se uthayenge
+            try:
+                api_key = settings.GROQ_API_KEY.get_secret_value()
+            except Exception:
+                api_key = os.getenv("GROQ_API_KEY")
+
+            if not api_key:
+                raise ValueError("GROQ_API_KEY missing hai settings aur environment dono me!")
+
+            self.client = Groq(api_key=api_key)
+            # Production coding ke liye Llama 3 70B standard aur powerful model hai
+            self.model = "llama3-70b-8192"
+            print("✅ Groq AI Coding Engine successfully initialize ho gaya!")
         except Exception as e:
-            logger.critical("Google Gemini SDK configuration failed!", error=str(e))
+            logger.critical("Groq SDK configuration failed!", error=str(e))
             raise AIServiceException(f"AI Service configuration error: {str(e)}")
 
     def _build_system_instruction(self) -> str:
-        # AI ko strict coding guidelines dene ke liye system prompt
         return (
             "Aap ek Elite AI Coding Assistant hain. Har request ka safe aur complete runnable code generate karein.\n"
             "Saare generated files ko strictly is JSON array structure me hi return karein:\n"
@@ -34,33 +44,37 @@ class AICodingEngine:
 
     async def generate_solution(self, prompt: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
         try:
-            contents = []
-            # Purani chat history ko add kiya ja raha hai context ke liye
+            # Messages array ready kar rahe hain Groq chat completion ke liye
+            messages = [{"role": "system", "content": self._build_system_instruction()}]
+            
+            # History maps ko Groq format me convert kar rahe hain
             for h in history:
-                contents.append({"role": "user" if h["role"] == "user" else "model", "parts": [h["content"]]})
-            
-            # System instructions ke saath naya user prompt inject kiya ja raha hai
-            contents.append({"role": "user", "parts": [f"{self._build_system_instruction()}\nUser Request: {prompt}"]})
-            
-            response = await self.model.generate_content_async(
-                contents=contents,
-                generation_config={
-                    "temperature": 0.2, # Kam temperature taaki bugs na aayein
-                    "top_p": 0.95,
-                    "max_output_tokens": 8192
-                }
-            )
-            
-            if not response.text:
-                raise AIServiceException("AI service returned empty response!")
+                role = "assistant" if h["role"] == "model" else h["role"]
+                messages.append({"role": role, "content": h["content"]})
                 
-            return self._parse_response(response.text)
+            # Latest prompt add kar rahe hain
+            messages.append({"role": "user", "content": prompt})
+
+            # Groq API Sync call ko wrapped rakhenge async workflow ke hisab se
+            chat_completion = self.client.chat.completions.create(
+                messages=messages,
+                model=self.model,
+                temperature=0.2, # Kam temperature taaki bugs na aayein
+                max_tokens=4096,
+                top_p=0.95
+            )
+
+            response_text = chat_completion.choices[0].message.content
+
+            if not response_text:
+                raise AIServiceException("Groq AI service returned empty response!")
+
+            return self._parse_response(response_text)
         except Exception as e:
             logger.error("Response generation failed!", error=str(e))
             raise AIServiceException(f"Model generation error: {str(e)}")
 
     def _parse_response(self, text: str) -> Dict[str, Any]:
-        # JSON output aur text commentary ko alag-alag karne ka logic
         try:
             start_idx = text.find("[")
             end_idx = text.rfind("]") + 1
@@ -72,4 +86,3 @@ class AICodingEngine:
         except Exception:
             pass
         return {"files": [], "commentary": text}
-      
