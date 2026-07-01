@@ -9,11 +9,8 @@ from src.errors.handlers import DatabaseTransactionError
 logger = structlog.get_logger(__name__)
 
 # --- AUTOMATIC DATABASE URL PROTOCOL FIXER ---
-raw_url = settings.DATABASE_URL
-
-# Agar settings se normal string na mile (Pydantic SecretStr ho)
-if hasattr(raw_url, "get_secret_value"):
-    raw_url = raw_url.get_secret_value()
+# SecretStr se string nikal rahe hain safely
+raw_url = settings.DATABASE_URL.get_secret_value() if hasattr(settings.DATABASE_URL, "get_secret_value") else settings.DATABASE_URL
 
 # Protocol ko ensure karein ki sirf asyncpg driver hi use ho
 if raw_url.startswith("postgres://"):
