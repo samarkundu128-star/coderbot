@@ -1,4 +1,4 @@
-```python
+python
 import structlog
 
 logger = structlog.get_logger(__name__)
@@ -20,5 +20,3 @@ class AIServiceException(BaseAppException):
 class TelegramDeliveryException(BaseAppException):
     """Telegram message delivery errors ke liye."""
     pass
-
-```
