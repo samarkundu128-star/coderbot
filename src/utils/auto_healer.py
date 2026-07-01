@@ -4,10 +4,15 @@ import os
 from groq import Groq
 from github import Github
 
-# Groq Client initialize kar rahe hain safely
-# Yeh automatic environment variable 'GROQ_API_KEY' se token utha leta hai
+# Groq Client ko safely clean tarike se initialize kar rahe hain
+# Isse 'proxies' wala unexpected keyword argument error nahi aayega
 try:
-    client = Groq()
+    groq_api_key = os.getenv("GROQ_API_KEY")
+    if groq_api_key:
+        client = Groq(api_key=groq_api_key)
+    else:
+        print("Auto-Healer Error: GROQ_API_KEY environment variable nahi mila!")
+        client = None
 except Exception as e:
     print(f"Auto-Healer Initialization Error: {e}")
     client = None
@@ -17,16 +22,16 @@ def commit_code_to_github(file_path: str, new_content: str):
     try:
         token = os.getenv("GITHUB_TOKEN")
         repo_name = os.getenv("REPO_NAME")
-        
+
         if not token or not repo_name:
             print("Auto-Healer Error: GITHUB_TOKEN ya REPO_NAME missing hai!")
             return
 
         g = Github(token)
         repo = g.get_repo(repo_name)
-        
+
         contents = repo.get_contents(file_path, ref="main")
-        
+
         repo.update_file(
             path=file_path,
             message="🤖 AI Auto-Heal: Upgraded to Groq API & Fixed runtime crash",
@@ -45,7 +50,7 @@ def ai_autonomous_healer(exc_type, exc_value, exc_traceback):
         return
 
     error_msg = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
-    
+
     tb = exc_traceback
     while tb.tb_next:
         tb = tb.tb_next
@@ -85,10 +90,10 @@ def ai_autonomous_healer(exc_type, exc_value, exc_traceback):
             model="llama3-8b-8192",
         )
         fixed_code = chat_completion.choices[0].message.content
-        
+
         if fixed_code.startswith("```"):
             fixed_code = "\n".join(fixed_code.split("\n")[1:-1])
-            
+
         commit_code_to_github(relative_path, fixed_code.strip())
     except Exception as ai_err:
         print(f"Autonomous healer failed: {ai_err}")
