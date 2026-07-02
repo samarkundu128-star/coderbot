@@ -1,12 +1,25 @@
-from pydantic_settings import BaseSettings
-from pydantic import field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import field_validator, SecretStr
+
 
 class Settings(BaseSettings):
-    # --- Aapki core system requirements ---
+    # --- Core system requirements ---
     DATABASE_URL: str
-    
-    # Humne Gemini hata kar yahan GROQ_API_KEY ko properly jod diya hai
-    GROQ_API_KEY: str
+
+    # --- AI Core (Groq) ---
+    GROQ_API_KEY: SecretStr
+
+    # --- Telegram Bot ---
+    TELEGRAM_BOT_TOKEN: SecretStr
+    WEBHOOK_URL: str
+    WEBHOOK_SECRET_TOKEN: SecretStr
+
+    # --- Auto-Healer (GitHub + Render) ---
+    GITHUB_TOKEN: SecretStr
+    REPO_NAME: str
+
+    # --- Runtime info (health check ke liye) ---
+    ENVIRONMENT: str = "production"
 
     @field_validator("DATABASE_URL", mode="before")
     @classmethod
@@ -23,8 +36,11 @@ class Settings(BaseSettings):
             v = v.replace("postgresql+psycopg2://", "postgresql+asyncpg://", 1)
         return v
 
-    class Config:
-        env_file = ".env"
-        extra = "ignore" # Isse extra variables se crash nahi hoga
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        extra="ignore",       # unknown env vars ko silently ignore karo
+        case_sensitive=True,  # env var names exact case match hone chahiye
+    )
+
 
 settings = Settings()
