@@ -1,88 +1,103 @@
+import json
+import asyncio
 import structlog
-from telegram import Update, constants
-from telegram.ext import CallbackContext
-from src.telegram.middleware import TelegramMiddlewareEngine
-from src.database.connection import AsyncSessionLocal
-from src.database.repository import ChatRepository, ProjectRepository
-from src.services.ai_engine import AICodingEngine
+from groq import Groq
+from telegram import Update
+from telegram.ext import ContextTypes
+
+from src.config.settings import settings
 
 logger = structlog.get_logger(__name__)
-ai_engine = AICodingEngine()
 
-async def process_ai_request(update: Update, context: CallbackContext, prompt: str) -> None:
+# Groq client ek baar hi initialize hoga (module load par)
+groq_client = Groq(api_key=settings.GROQ_API_KEY.get_secret_value())
+
+# NOTE: llama3-70b-8192, llama-3.3-70b-versatile, aur llama-3.1-8b-instant sab
+# Groq dwara deprecate ho chuke hain (last update: 17 June 2026).
+# Current recommended high-quality model: openai/gpt-oss-120b
+GROQ_MODEL = "openai/gpt-oss-120b"
+
+SYSTEM_PROMPT = """You are an elite coding assistant. When given a task, respond ONLY with a valid JSON object — no markdown fences, no extra commentary, nothing outside the JSON.
+
+The JSON must have exactly these keys:
+{
+  "language": "programming language name, e.g. python",
+  "filename": "suggested filename, e.g. calculator.py",
+  "code": "the complete, runnable code as a single string with \\n for newlines",
+  "explanation": "a short 1-3 sentence explanation of how the code works"
+}
+
+Rules:
+- Code must be complete and runnable, not a snippet.
+- Do not wrap the JSON in ```json fences.
+- Do not add any text before or after the JSON object.
+"""
+
+
+async def do_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    AI model ke paas request bhejta hai aur output telegram par respond karta hai.
+    Handles the /do command. Usage: /do <coding task in plain language>
+    Sends the task to Groq AI and returns generated, runnable code.
     """
-    chat_id = update.effective_chat.id
-    tg_id = update.effective_user.id
+    user_task = " ".join(context.args) if context.args else ""
 
-    # Telegram typing indicator show karenge jab tak response aa raha hai
-    await context.bot.send_chat_action(chat_id=chat_id, action=constants.ChatAction.TYPING)
-
-    async with AsyncSessionLocal() as session:
-        chat_repo = ChatRepository(session)
-        proj_repo = ProjectRepository(session)
-
-        # Purani conversation history context ke liye fetch karte hain
-        raw_history = await chat_repo.get_history(chat_id, limit=10)
-        formatted_history = [{"role": h.role, "content": h.content} for h in raw_history]
-
-        try:
-            # AI engine se output request kar rahe hain
-            response_payload = await ai_engine.generate_solution(prompt, formatted_history)
-        except Exception as e:
-            logger.error("AI engine call failed!", error=str(e))
-            await update.effective_chat.send_message(text=f"❌ **Error:** Processing me dikkat aayi: {str(e)}")
-            return
-
-        files = response_payload.get("files", [])
-        commentary = response_payload.get("commentary", "Request successfully processed.")
-
-        # Conversation history update kar rahe hain
-        await chat_repo.add_history(chat_id, "user", prompt)
-        await chat_repo.add_history(chat_id, "assistant", commentary)
-
-        # Agar user ka naya project space set hai toh files automatically wahan save hongi
-        user_projects = await proj_repo.get_user_projects(tg_id)
-        if user_projects and files:
-            target_project = user_projects[0]
-            for file_info in files:
-                await proj_repo.add_file_to_project(
-                    project_id=target_project.id,
-                    file_path=file_info["file_path"],
-                    content=file_info["content"]
-                )
-        await session.commit()
-
-    # Agar explanation text 4000 characters se bada hai toh break karke bhejenge
-    if len(commentary) > 4000:
-        for chunk in [commentary[i:i+4000] for i in range(0, len(commentary), 4000)]:
-            await update.effective_chat.send_message(text=chunk)
-    else:
-        await update.effective_chat.send_message(text=commentary)
-
-    # Saari generated codes aur files ko complete formatted codeblock me bhej rahe hain
-    for file_info in files:
-        escaped_code = f"📂 **File Path:** `{file_info['file_path']}`\n```\n{file_info['content']}\n```"
-        await update.effective_chat.send_message(text=escaped_code, parse_mode=constants.ParseMode.MARKDOWN)
-
-async def core_message_handler(update: Update, context: CallbackContext) -> None:
-    """
-    Normal direct text messages handle karne ke liye middleware checks ke sath.
-    """
-    if not await TelegramMiddlewareEngine.process_user_and_rate_limit(update, context):
+    if not user_task.strip():
+        await update.message.reply_text(
+            "⚠️ Usage: `/do <apna coding task likhein>`\n\n"
+            "Example: `/do python mein calculator banao`",
+            parse_mode="Markdown",
+        )
         return
-    prompt = update.message.text
-    await process_ai_request(update, context, prompt)
 
-async def do_command_handler(update: Update, context: CallbackContext) -> None:
+    thinking_msg = await update.message.reply_text("⏳ Code generate ho raha hai, thoda ruko...")
+
+    try:
+        # Groq SDK synchronous hai — event loop block na ho isliye thread mein chalayein
+        response = await asyncio.to_thread(
+            groq_client.chat.completions.create,
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_task},
+            ],
+            temperature=0.3,
+            max_tokens=2048,
+            response_format={"type": "json_object"},
+        )
+
+        raw_output = response.choices[0].message.content
+        data = json.loads(raw_output)
+
+        language = data.get("language", "")
+        filename = data.get("filename", "code.txt")
+        code = data.get("code", "")
+        explanation = data.get("explanation", "")
+
+        reply_text = (
+            f"📄 *{filename}*\n\n"
+            f"```{language}\n{code}\n```\n\n"
+            f"_{explanation}_"
+        )
+
+        await thinking_msg.edit_text(reply_text, parse_mode="Markdown")
+        logger.info("Code generated successfully via /do", task=user_task, filename=filename)
+
+    except json.JSONDecodeError:
+        logger.error("Groq response was not valid JSON", raw=raw_output if "raw_output" in dir() else None)
+        await thinking_msg.edit_text("⚠️ AI ne galat format mein response diya. Dubara try karein.")
+
+    except Exception as e:
+        logger.error("do_command_handler failed", error=str(e))
+        await thinking_msg.edit_text(f"⚠️ Kuch galat ho gaya: {str(e)}")
+
+
+async def core_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Special command `/Do` trigger handle karne ke liye.
+    Handles plain text messages (non-command). Currently guides the user
+    to use /do for code generation tasks.
     """
-    if not await TelegramMiddlewareEngine.process_user_and_rate_limit(update, context):
-        return
-    if not context.args:
-        await update.effective_chat.send_message(text="❌ **Instruction empty:** Kripya instruction likhein. E.g., `/Do print hello world`")
-        return
-    prompt = " ".join(context.args)
-    await process_ai_request(update, context, prompt)
+    await update.message.reply_text(
+        "💡 Agar aapko code chahiye, `/do` command use karein.\n\n"
+        "Example: `/do python mein calculator banao`",
+        parse_mode="Markdown",
+    )
