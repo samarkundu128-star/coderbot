@@ -1,14 +1,23 @@
 import structlog
+from groq import Groq
 from github import Github, GithubException
 from telegram import Update
 from telegram.ext import ContextTypes
 
 from src.config.settings import settings
-from src.telegram.handlers import groq_client  # already-initialized Groq client reuse karein
 
 logger = structlog.get_logger(__name__)
 
 github_client = Github(settings.GITHUB_TOKEN.get_secret_value())
+
+# Apna khud ka Groq client (handlers.py par depend nahi karta, kisi bhi naam ka
+# variable ho ya na ho wahan — is file ko standalone rakha hai)
+groq_client = Groq(api_key=settings.GROQ_API_KEY.get_secret_value())
+
+# NOTE: llama3-70b-8192, llama-3.3-70b-versatile, aur llama-3.1-8b-instant sab
+# Groq dwara deprecate ho chuke hain (last update: 17 June 2026). Current
+# recommended high-quality model: openai/gpt-oss-120b
+GROQ_MODEL = "openai/gpt-oss-120b"
 
 SELF_MODIFY_SYSTEM_PROMPT = """You are an elite Python developer editing an existing source file.
 You will be given the CURRENT FULL CONTENT of a file and an INSTRUCTION describing a change or
@@ -121,7 +130,7 @@ async def _generate_updated_code(current_content: str, instructions: str) -> str
 
     completion = await asyncio.to_thread(
         groq_client.chat.completions.create,
-        model="llama3-70b-8192",
+        model=GROQ_MODEL,
         messages=[
             {"role": "system", "content": SELF_MODIFY_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
