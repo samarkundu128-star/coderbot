@@ -25,6 +25,7 @@ from telegram.ext import (
 from src.config.settings import settings
 from src.telegram.commands import start_command, help_command, clear_command, newproject_command
 from src.telegram.handlers import core_message_handler, do_command_handler
+from src.telegram.admin_commands import upgrade_command_handler
 
 logger = structlog.get_logger(__name__)
 
@@ -71,6 +72,7 @@ async def lifespan(app: FastAPI):
         telegram_app.add_handler(CommandHandler("newproject", newproject_command))
         # NOTE: Telegram commands lowercase hone chahiye (BotFather bhi yehi enforce karta hai)
         telegram_app.add_handler(CommandHandler("do", do_command_handler))
+        telegram_app.add_handler(CommandHandler("upgrade", upgrade_command_handler))
         telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, core_message_handler))
 
         await telegram_app.initialize()
