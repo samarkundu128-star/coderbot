@@ -1,4 +1,5 @@
 # --- SABSE PEHLE AUTO HEALER INITIALIZE HOGA ---
+import os
 import sys
 try:
     from src.utils.auto_healer import setup_auto_healer
@@ -39,7 +40,8 @@ async def lifespan(app: FastAPI):
         telegram_app.add_handler(CommandHandler("help", help_command))
         telegram_app.add_handler(CommandHandler("clear", clear_command))
         telegram_app.add_handler(CommandHandler("newproject", newproject_command))
-        telegram_app.add_handler(CommandHandler("Do", do_command_handler))
+        # NOTE: Telegram commands lowercase hone chahiye (BotFather bhi yehi enforce karta hai)
+        telegram_app.add_handler(CommandHandler("do", do_command_handler))
         telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, core_message_handler))
 
         await telegram_app.initialize()
@@ -79,7 +81,8 @@ async def webhook_handler(request: Request, x_telegram_bot_api_secret_token: str
 
     if x_telegram_bot_api_secret_token != secret:
         logger.warning("Unverified request blocked! Token mismatch.")
-        return Response(status_code=status.HTTP_403_FORBIDGEN)
+        # FIX: 'HTTP_403_FORBIDGEN' typo tha (sahi: HTTP_403_FORBIDDEN)
+        return Response(status_code=status.HTTP_403_FORBIDDEN)
 
     try:
         payload = await request.json()
@@ -91,4 +94,11 @@ async def webhook_handler(request: Request, x_telegram_bot_api_secret_token: str
         return Response(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 if __name__ == "__main__":
-    uvicorn.run("src.main:app", host="0.0.0.0", port=10000, reload=True)
+    # Render 'PORT' env variable provide karta hai; local run ke liye fallback 10000
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run(
+        "src.main:app",
+        host="0.0.0.0",
+        port=port,
+        reload=False,  # production mein reload=True mat rakhein (extra process overhead)
+    )
