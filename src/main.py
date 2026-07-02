@@ -2,7 +2,7 @@
 import os
 import sys
 try:
-    from src.utils.auto_healer import setup_auto_healer
+    from src.utils.auto_healer import setup_auto_healer, register_async_exception_handler
     setup_auto_healer()
     print("✅ AI Auto-Healer successfully initialize ho gaya hai!")
 except Exception as e:
@@ -66,6 +66,12 @@ telegram_app = (
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
+        # Ab actual uvloop chal raha hai — yahan async exception handler register karein
+        try:
+            register_async_exception_handler()
+        except NameError:
+            pass  # agar auto_healer import hi fail hua tha, silently skip
+
         telegram_app.add_handler(CommandHandler("start", start_command))
         telegram_app.add_handler(CommandHandler("help", help_command))
         telegram_app.add_handler(CommandHandler("clear", clear_command))
