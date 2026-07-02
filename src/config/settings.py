@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     GITHUB_TOKEN: SecretStr
     REPO_NAME: str
 
+    # --- Admin control (self-modify command ke liye — SIRF yahi ID command chala payega) ---
+    ADMIN_TELEGRAM_ID: int
+
     # --- Runtime info (health check ke liye) ---
     ENVIRONMENT: str = "production"
 
