@@ -9,6 +9,7 @@ except Exception as e:
     print(f"⚠️ Auto-Healer initialize nahi ho paya (Ya file missing hai): {e}")
 # -----------------------------------------------
 
+import re
 import uvicorn
 import structlog
 from contextlib import asynccontextmanager
@@ -26,6 +27,34 @@ from src.telegram.commands import start_command, help_command, clear_command, ne
 from src.telegram.handlers import core_message_handler, do_command_handler
 
 logger = structlog.get_logger(__name__)
+
+
+def sanitize_secret_token(raw_token: str) -> str:
+    """
+    Telegram sirf A-Z, a-z, 0-9, '_', '-' allow karta hai secret_token mein.
+    Mobile copy-paste se aksar invisible characters (spaces, newlines, smart-quotes,
+    zero-width chars) chale aate hain jo screen par dikhte nahi. Yeh function
+    unhe automatically strip/filter kar deta hai taaki bot crash na ho.
+    """
+    cleaned = raw_token.strip()
+    allowed_pattern = re.compile(r"[^A-Za-z0-9_\-]")
+    invalid_chars = allowed_pattern.findall(cleaned)
+
+    if invalid_chars:
+        logger.warning(
+            "WEBHOOK_SECRET_TOKEN mein invalid/hidden characters mile — auto-removing.",
+            invalid_chars_found=repr(invalid_chars),
+            original_length=len(raw_token),
+        )
+        cleaned = allowed_pattern.sub("", cleaned)
+
+    logger.info(
+        "Secret token sanitized.",
+        final_length=len(cleaned),
+        final_token_repr=repr(cleaned),
+    )
+    return cleaned
+
 
 telegram_app = (
     Application.builder()
@@ -46,12 +75,17 @@ async def lifespan(app: FastAPI):
 
         await telegram_app.initialize()
 
-        webhook_target = f"{settings.WEBHOOK_URL}/webhook"
+        # WEBHOOK_URL bhi clean kar lein (trailing space/slash jaisi mobile-copy-paste dikkatein)
+        webhook_base = settings.WEBHOOK_URL.strip().rstrip("/")
+        webhook_target = f"{webhook_base}/webhook"
         logger.info("Connecting Telegram Webhook...", url=webhook_target)
+
+        clean_secret = sanitize_secret_token(settings.WEBHOOK_SECRET_TOKEN.get_secret_value())
+        app.state.webhook_secret = clean_secret  # webhook_handler mein reuse karne ke liye
 
         await telegram_app.bot.set_webhook(
             url=webhook_target,
-            secret_token=settings.WEBHOOK_SECRET_TOKEN.get_secret_value()
+            secret_token=clean_secret
         )
         logger.info("Telegram Webhook connection online successfully!")
 
@@ -77,7 +111,10 @@ async def health_check():
 
 @app.post("/webhook")
 async def webhook_handler(request: Request, x_telegram_bot_api_secret_token: str = Header(None)):
-    secret = settings.WEBHOOK_SECRET_TOKEN.get_secret_value()
+    # Sanitized secret use karein (wahi jo set_webhook mein Telegram ko diya gaya tha)
+    secret = getattr(app.state, "webhook_secret", None) or sanitize_secret_token(
+        settings.WEBHOOK_SECRET_TOKEN.get_secret_value()
+    )
 
     if x_telegram_bot_api_secret_token != secret:
         logger.warning("Unverified request blocked! Token mismatch.")
