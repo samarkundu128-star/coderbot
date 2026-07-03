@@ -8,6 +8,22 @@
 set -u  # treat unset vars as errors, but DO NOT use `set -e`
         # (we want to catch failures ourselves, not exit on them)
 
+# --- Force correct working directory & Python path, no matter
+# --- what directory Render actually launches this script from.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR" || { echo "[entrypoint] FATAL: cannot cd to $SCRIPT_DIR"; exit 1; }
+export PYTHONPATH="$SCRIPT_DIR:${PYTHONPATH:-}"
+
+echo "[entrypoint] Working directory: $(pwd)"
+echo "[entrypoint] Contents:"
+ls -la
+
+if [ ! -d "$SCRIPT_DIR/src" ]; then
+    echo "[entrypoint] FATAL: 'src' folder not found in $SCRIPT_DIR"
+    echo "[entrypoint] Check your GitHub repo structure / Render Root Directory setting."
+    exit 1
+fi
+
 HOST="0.0.0.0"
 PORT="${PORT:-10000}"          # Render injects $PORT — fall back to 10000 locally
 APP_MODULE="src.main:app"
