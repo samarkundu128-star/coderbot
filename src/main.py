@@ -28,15 +28,14 @@ from telegram.ext import (
 
 from src.config.settings import settings
 from src.database.connection import init_db_schema
-# NAYA IMPORT: links_command ko yahan add kiya gaya hai
 from src.telegram.commands import start_command, help_command, clear_command, newproject_command, links_command
-# NAYA IMPORT: quality_button_callback_handler ko yahan add kiya gaya hai
-from src.telegram.handlers import core_message_handler, do_command_handler, quality_button_callback_handler
+# FIXED: do_command_handler ko yahan se hata diya gaya hai kyunki core_message_handler hi sab handle karti hai
+from src.telegram.handlers import core_message_handler, quality_button_callback_handler
 from src.telegram.admin_commands import (
     upgrade_command_handler,
     restart_command_handler,
     addlink_command_handler,
-    list_recent_links_command_handler,  # Purane list_links_command_handler ka badla hua naam
+    list_recent_links_command_handler,
     sync_website_command_handler,
 )
 from src.telegram.scraper_commands import getlinks_command_handler
@@ -58,7 +57,6 @@ async def run_scheduler_jobs():
 
 def build_telegram_application() -> Application:
     """Builds and wires up internal routes for upstream production dispatch."""
-    # Build python-telegram-bot application context instance safely
     application = (
         Application.builder()
         .token(settings.TELEGRAM_BOT_TOKEN.get_secret_value())
@@ -66,7 +64,7 @@ def build_telegram_application() -> Application:
     )
 
     # --------------------------------------------------------------------------
-    # MIDDLEWARE GATEWAY (Group -1 runs before any standard text handlers)
+    # MIDDLEWARE GATEWAY
     # --------------------------------------------------------------------------
     async def middleware_interceptor_wrapper(update: Update, context):
         allowed = await run_global_middleware(update, context)
@@ -83,7 +81,7 @@ def build_telegram_application() -> Application:
     )
 
     # --------------------------------------------------------------------------
-    # NEW FEATURE REGISTER: Quality Buttons (480p, 720p, 1080p) Click Event
+    # QUALITY BUTTONS CLICK EVENT
     # --------------------------------------------------------------------------
     application.add_handler(
         CallbackQueryHandler(quality_button_callback_handler, pattern=r"^bypass_")
@@ -96,8 +94,6 @@ def build_telegram_application() -> Application:
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("clear", clear_command))
     application.add_handler(CommandHandler("newproject", newproject_command))
-    
-    # NEW FEATURE REGISTER: Saare users ke liye public dynamic search command
     application.add_handler(CommandHandler("links", links_command))
 
     # --------------------------------------------------------------------------
@@ -108,20 +104,16 @@ def build_telegram_application() -> Application:
     application.add_handler(CommandHandler("addlink", addlink_command_handler))
     application.add_handler(CommandHandler("syncwebsite", sync_website_command_handler))
     application.add_handler(CommandHandler("getlinks", getlinks_command_handler))
-    application.add_handler(CommandHandler("do", do_command_handler))
-    
-    # MODIFIED REGISTER: Purane admin command ko safely rename karke add kiya gaya hai
     application.add_handler(CommandHandler("recentlinks", list_recent_links_command_handler))
 
     # --------------------------------------------------------------------------
-    # PLAIN TEXT FALLBACK (Handles non-command chats, text inputs and admin auto-saves)
+    # PLAIN TEXT FALLBACK (Handles text inputs, /do requests, and admin auto-saves)
     # --------------------------------------------------------------------------
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, core_message_handler))
 
     return application
 
 
-# Global container reference variables
 tg_application: Application = None
 scheduler: AsyncIOScheduler = None
 
@@ -132,26 +124,21 @@ async def lifespan_context_manager(app: FastAPI):
     global tg_application, scheduler
     logger.info("Initializing application infrastructure...")
 
-    # Initialize SQL database layer migrations or drivers
     await init_db_schema()
 
-    # Build shared memory engine instance
     tg_application = build_telegram_application()
     await tg_application.initialize()
 
-    # Register asynchronous exception auto-healer tracking listeners
     try:
         register_async_exception_handler(tg_application)
     except NameError:
         pass
 
-    # Start scheduling daemons
     scheduler = AsyncIOScheduler()
     scheduler.add_job(run_scheduler_jobs, "interval", hours=4, id="auto_website_sync")
     scheduler.start()
     logger.info("Background Cron scheduler scheduler initialized successfully.")
 
-    # Upstream setup: Production Webhooks vs local polling mechanism fallback
     if settings.WEBHOOK_ENABLED and settings.WEBHOOK_URL:
         webhook_target = f"{settings.WEBHOOK_URL.rstrip('/')}/telegram-webhook-endpoint"
         logger.info("Registering outbound Upstream Webhook URL target...", target=webhook_target)
@@ -167,9 +154,8 @@ async def lifespan_context_manager(app: FastAPI):
         await tg_application.start()
         await tg_application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
 
-    yield  # REST OF SERVER RUNTIME OCCURS HERE DURING EXECUTION STATE
+    yield
 
-    # --- CLEANUP GRACEFUL SHUTDOWN INSTRUCTIONS ---
     logger.info("Triggering standard microservice graceful shutdown procedures...")
     if scheduler.running:
         scheduler.shutdown()
@@ -185,7 +171,6 @@ async def lifespan_context_manager(app: FastAPI):
     logger.info("Infrastructure lifecycle destroyed successfully. Off.")
 
 
-# Root context initialization instantiation
 app = FastAPI(
     title="AI Telegram Link Service Engine",
     version="2.4.0",
@@ -195,7 +180,6 @@ app = FastAPI(
 
 @app.get("/healthz", status_code=status.HTTP_200_OK)
 async def service_health_check_endpoint():
-    """Automated orchestration standard monitoring live targets diagnostics."""
     return {"status": "healthy", "scheduler_active": scheduler.running if scheduler else False}
 
 
@@ -203,7 +187,6 @@ async def service_health_check_endpoint():
 async def process_incoming_telegram_updates(
     request: Request, x_telegram_bot_api_secret_token: str = Header(None, alias="X-Telegram-Bot-Api-Secret-Token")
 ):
-    """Processes incoming data directly from official global cloud endpoints safely."""
     if not settings.WEBHOOK_ENABLED:
         return Response(status_code=status.HTTP_404_NOT_FOUND)
 
