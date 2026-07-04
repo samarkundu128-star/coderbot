@@ -1,232 +1,255 @@
-import sys
-import time
-import hashlib
-import threading
-import traceback
-import ast
-import os
+import re
+import json
+import asyncio
+import structlog
+import httpx
+from bs4 import BeautifulSoup
 from groq import Groq
-from github import Github
+from telegram import Update
+from telegram.ext import ContextTypes
 
-# --- Groq Client initialize kar rahe hain safely ---
-try:
-    groq_api_key = os.getenv("GROQ_API_KEY")
-    client = Groq(api_key=groq_api_key) if groq_api_key else None
-except Exception as e:
-    print(f"Auto-Healer Initialization Error: {e}")
-    client = None
+from src.config.settings import settings
+from src.database.connection import AsyncSessionLocal
+from src.database.repository import LinkRepository
+from src.services.ai_engine import AICodingEngine
+from src.services.github_service import push_files
+from src.services.render_service import watch_deploy_and_notify
+from src.services.intent_router import classify_intent
 
-# NOTE: llama3-8b-8192, llama3-70b-8192, llama-3.3-70b-versatile, aur
-# llama-3.1-8b-instant sab deprecate ho chuke hain (last Groq update: 17 June 2026).
-# Primary = accurate bug-fixing ke liye, Fallback = agar primary fail ho jaye.
-GROQ_MODEL_PRIMARY = "openai/gpt-oss-120b"
-GROQ_MODEL_FALLBACK = "openai/gpt-oss-20b"
+logger = structlog.get_logger(__name__)
 
-# --- Crash-loop protection: same error baar baar fix karne ki koshish na kare ---
-_recent_fix_attempts = {}  # {error_hash: (timestamp, attempt_count)}
-_MAX_ATTEMPTS_PER_ERROR = 3
-_COOLDOWN_SECONDS = 3600  # 1 ghanta
+# Groq client ek baar hi initialize hoga (module load par) — /do command ke liye
+groq_client = Groq(api_key=settings.GROQ_API_KEY.get_secret_value())
+GROQ_MODEL = "openai/gpt-oss-120b"
 
+_ai_engine = AICodingEngine()
 
-def _get_error_hash(filename: str, error_msg: str) -> str:
-    """Same file + same error type ko identify karne ke liye hash banata hai."""
-    key = f"{filename}:{error_msg.splitlines()[-1] if error_msg else ''}"
-    return hashlib.sha256(key.encode()).hexdigest()[:16]
+URL_REGEX = re.compile(r"https?://[^\s]+")
 
+SYSTEM_PROMPT = """You are an elite coding assistant. When given a task, respond ONLY with a valid JSON object — no markdown fences, no extra commentary, nothing outside the JSON.
 
-def _is_rate_limited(error_hash: str) -> bool:
-    """Agar yehi error bahut baar aa chuka hai, toh Healer ko rok dein."""
-    now = time.time()
-    if error_hash in _recent_fix_attempts:
-        last_time, count = _recent_fix_attempts[error_hash]
-        if now - last_time < _COOLDOWN_SECONDS:
-            if count >= _MAX_ATTEMPTS_PER_ERROR:
-                print(f"⛔ Auto-Healer: Is error ko {count} baar fix karne ki koshish ho chuki hai. "
-                      f"Cooldown active hai — manual review zaroori hai.")
-                return True
-            _recent_fix_attempts[error_hash] = (last_time, count + 1)
-            return False
-    _recent_fix_attempts[error_hash] = (now, 1)
-    return False
+The JSON must have exactly these keys:
+{
+  "language": "programming language name, e.g. python",
+  "filename": "suggested filename, e.g. calculator.py",
+  "code": "the complete, runnable code as a single string with \\n for newlines",
+  "explanation": "a short 1-3 sentence explanation of how the code works"
+}
 
+Rules:
+- Code must be complete and runnable, not a snippet.
+- Do not wrap the JSON in ```json fences.
+- Do not add any text before or after the JSON object.
+"""
 
-def _is_valid_python(code: str) -> bool:
-    """Recheck step: AI ka generated code syntactically valid hai ya nahi, commit se pehle verify karta hai."""
-    try:
-        ast.parse(code)
-        return True
-    except SyntaxError as e:
-        print(f"⚠️ Auto-Healer: AI-generated code invalid hai (SyntaxError: {e}). Commit skip kar raha hoon.")
-        return False
+# Public users ke liye — sirf teach/guide karta hai, kabhi code-push ya GitHub touch nahi karta
+ASSISTANT_SYSTEM_PROMPT = """Tum "Coderbot Assistant" ho — is Telegram bot ka friendly, professional
+AI guide. Tumhara kaam hai users ko bot ke features samjhana aur unki general coding queries me
+madad karna. Hamesha Hinglish-friendly, simple aur encouraging tone use karo.
+
+Rules:
+- Bot ke commands (/do, /newproject, /clear, /help) explain kar sakte ho.
+- General coding concepts, debugging tips, best-practices explain kar sakte ho.
+- Kabhi bhi khud se code-file generate karke GitHub par push karne ka dawa mat karo — wo
+  sirf bot owner ka privilege hai.
+- Agar user real code chahta hai, unhe `/do <task>` use karne ko bolo.
+- Chhoti, friendly replies do — lambi lecture mat do.
+"""
 
 
-def commit_to_github_and_trigger(file_path: str, new_content: str):
-    """GitHub par push karega jisse Render par automatic deploy trigger ho jayega."""
-    try:
-        token = os.getenv("GITHUB_TOKEN")
-        repo_name = os.getenv("REPO_NAME")
+def _is_admin(update: Update) -> bool:
+    return update.effective_user is not None and update.effective_user.id == settings.ADMIN_TELEGRAM_ID
 
-        if not token or not repo_name:
-            print("Auto-Healer Error: GITHUB_TOKEN ya REPO_NAME missing hai!")
-            return False
 
-        g = Github(token)
-        repo = g.get_repo(repo_name)
-        contents = repo.get_contents(file_path, ref="main")
+# ---------------------------------------------------------------------------
+# /do command — legacy single-file quick code generation
+# ---------------------------------------------------------------------------
+async def do_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the /do command. Usage: /do <coding task in plain language>"""
+    user_task = " ".join(context.args) if context.args else ""
 
-        repo.update_file(
-            path=file_path,
-            message="🤖 AI Auto-Heal: Fixed bug & triggered auto-redeploy",
-            content=new_content,
-            sha=contents.sha,
-            branch="main"
+    if not user_task.strip():
+        await update.message.reply_text(
+            "⚠️ Usage: `/do <apna coding task likhein>`\n\n"
+            "Example: `/do python mein calculator banao`",
+            parse_mode="Markdown",
         )
-        print("🚀 Code GitHub par push ho gaya! Deployment automatically shuru ho raha hai...")
-        return True
+        return
+
+    thinking_msg = await update.message.reply_text("⏳ Code generate ho raha hai, thoda ruko...")
+
+    try:
+        response = await asyncio.to_thread(
+            groq_client.chat.completions.create,
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_task},
+            ],
+            temperature=0.3,
+            max_tokens=2048,
+            response_format={"type": "json_object"},
+        )
+
+        raw_output = response.choices[0].message.content
+        data = json.loads(raw_output)
+
+        language = data.get("language", "")
+        filename = data.get("filename", "code.txt")
+        code = data.get("code", "")
+        explanation = data.get("explanation", "")
+
+        reply_text = f"📄 *{filename}*\n\n```{language}\n{code}\n```\n\n_{explanation}_"
+
+        await thinking_msg.edit_text(reply_text, parse_mode="Markdown")
+        logger.info("Code generated successfully via /do", task=user_task, filename=filename)
+
+    except json.JSONDecodeError:
+        logger.error("Groq response was not valid JSON")
+        await thinking_msg.edit_text("⚠️ AI ne galat format mein response diya. Dubara try karein.")
     except Exception as e:
-        print(f"GitHub API push failed: {e}")
-        return False
+        logger.error("do_command_handler failed", error=str(e))
+        await thinking_msg.edit_text(f"⚠️ Kuch galat ho gaya: {str(e)}")
 
 
-def _generate_fix(prompt: str, model: str) -> str | None:
-    """Ek model se fix generate karne ki koshish karta hai. Fail hone par None return karta hai."""
+# ---------------------------------------------------------------------------
+# Link store: owner ke shared links ko save karna, aur kisi ke bhi liye search karna
+# ---------------------------------------------------------------------------
+async def _fetch_page_title(url: str) -> str | None:
     try:
-        chat_completion = client.chat.completions.create(
-            messages=[{"role": "user", "content": prompt}],
-            model=model,
-            temperature=0.2,
-            timeout=30,
-        )
-        fixed_code = chat_completion.choices[0].message.content
-
-        if fixed_code.startswith("```"):
-            fixed_code = "\n".join(fixed_code.split("\n")[1:-1])
-
-        return fixed_code.strip()
-    except Exception as ai_err:
-        print(f"⚠️ Auto-Healer: Model '{model}' se fix generate nahi hua: {ai_err}")
-        return None
-
-
-def _heal_in_background(filename: str, relative_path: str, error_msg: str, original_code: str):
-    """
-    Yeh function ek background thread mein chalta hai taaki Groq/GitHub ke
-    blocking network calls FastAPI ke event loop ko block na karein.
-    """
-    error_hash = _get_error_hash(filename, error_msg)
-    if _is_rate_limited(error_hash):
-        return
-
-    prompt = f"""
-    Mera Python bot crash ho gaya hai. Kripya is file ko theek karo.
-    Mujhe sirf aur sirf sahi kiya hua POORA CODE chahiye, aur kuch bhi mat likhna
-    (no explanations, no extra text, no markdown backticks).
-
-    [ERROR LOGS]:
-    {error_msg}
-
-    [FILE PATH]: {relative_path}
-
-    [ORIGINAL CODE]:
-    {original_code}
-    """
-
-    # Step 1: Primary model try karein
-    fixed_code = _generate_fix(prompt, GROQ_MODEL_PRIMARY)
-
-    # Step 2: Agar primary fail ho ya invalid code de, fallback model try karein
-    if not fixed_code or not _is_valid_python(fixed_code):
-        print("🔄 Auto-Healer: Fallback model try kar raha hoon...")
-        fixed_code = _generate_fix(prompt, GROQ_MODEL_FALLBACK)
-
-    # Step 3: Final recheck — agar ab bhi invalid hai, commit mat karo
-    if not fixed_code or not _is_valid_python(fixed_code):
-        print("❌ Auto-Healer: Dono models se valid fix nahi mila. Commit skip kar raha hoon — manual review zaroori.")
-        return
-
-    commit_to_github_and_trigger(relative_path, fixed_code)
-
-
-def _process_exception(exc_type, exc_value, exc_traceback):
-    """Common logic jo sync aur async dono exception paths se use hota hai."""
-    if client is None or (exc_type and issubclass(exc_type, KeyboardInterrupt)):
-        return
-
-    error_msg = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
-
-    tb = exc_traceback
-    while tb and tb.tb_next:
-        tb = tb.tb_next
-    if tb is None:
-        return
-
-    filename = tb.tb_frame.f_code.co_filename
-
-    if "site-packages" in filename or not os.path.exists(filename):
-        return
-
-    try:
-        with open(filename, "r") as f:
-            original_code = f.read()
+        async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
+            resp = await client.get(url)
+            soup = BeautifulSoup(resp.text, "html.parser")
+            if soup.title and soup.title.string:
+                return soup.title.string.strip()[:200]
     except Exception:
+        pass
+    return None
+
+
+async def _store_link_from_message(update: Update, url: str, remainder_text: str):
+    name = remainder_text.strip()
+    if not name:
+        name = await _fetch_page_title(url) or url
+
+    async with AsyncSessionLocal() as session:
+        repo = LinkRepository(session)
+        await repo.add_link(name=name, url=url, added_by=update.effective_user.id)
+        await session.commit()
+
+    await update.message.reply_text(
+        f"🔗 *Link save ho gaya!*\n\n📌 Name: `{name}`\n\nAb koi bhi user `{name}` type karega toh yeh link mil jayega.",
+        parse_mode="Markdown",
+    )
+
+
+async def _search_and_reply_link(update: Update, query: str) -> bool:
+    """Returns True agar koi matching link mila aur reply bhej diya."""
+    async with AsyncSessionLocal() as session:
+        repo = LinkRepository(session)
+        matches = await repo.search(query)
+
+    if not matches:
+        return False
+
+    if len(matches) == 1:
+        m = matches[0]
+        await update.message.reply_text(f"🔗 *{m.name}*\n{m.url}", parse_mode="Markdown")
+    else:
+        lines = [f"🔎 *{len(matches)} results mile:*\n"]
+        for m in matches:
+            lines.append(f"• *{m.name}*\n  {m.url}")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Owner natural-language code-task flow: /do ki tarah, but bina command ke
+# aur multi-file support + auto GitHub push + deploy-notify ke saath
+# ---------------------------------------------------------------------------
+async def _handle_owner_code_task(update: Update, context: ContextTypes.DEFAULT_TYPE, instruction: str):
+    status_msg = await update.message.reply_text("🧠 Samajh gaya, code prepare kar raha hoon...")
+
+    try:
+        result = await _ai_engine.generate_solution(instruction, history=[])
+        files = result.get("files", [])
+        commentary = (result.get("commentary") or "").strip()
+
+        if not files:
+            await status_msg.edit_text(
+                "⚠️ AI koi file generate nahi kar paya. Thoda aur specific instruction dekar dubara try karein.\n\n"
+                "Tip: `/upgrade <file_path> | <instructions>` bhi use kar sakte hain kisi ek specific file ke liye."
+            )
+            return
+
+        await status_msg.edit_text(f"📝 {len(files)} file(s) ready ho gayi. GitHub par push kar raha hoon...")
+
+        commit_sha = await asyncio.to_thread(push_files, files, f"🤖 AI update: {instruction[:60]}")
+
+        file_list = "\n".join(f"• `{f.get('file_path')}`" for f in files if f.get("file_path"))
+        summary = commentary[:400] + ("…" if len(commentary) > 400 else "")
+
+        await status_msg.edit_text(
+            f"🚀 *Push ho gaya!*\n{file_list}\n\n{summary}\n\n"
+            "Render deploy trigger ho chuka hai, main monitor kar raha hoon...",
+            parse_mode="Markdown",
+        )
+
+        context.application.create_task(
+            watch_deploy_and_notify(context.bot, update.effective_chat.id, commit_sha)
+        )
+        logger.info("Owner natural-language code task pushed", instruction=instruction, files=len(files))
+
+    except Exception as e:
+        logger.error("owner_code_task_failed", error=str(e))
+        await status_msg.edit_text(f"❌ Kuch galat ho gaya: {str(e)}")
+
+
+async def _handle_ai_chat(update: Update, user_text: str):
+    try:
+        response = await asyncio.to_thread(
+            groq_client.chat.completions.create,
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": ASSISTANT_SYSTEM_PROMPT},
+                {"role": "user", "content": user_text},
+            ],
+            temperature=0.6,
+            max_tokens=600,
+        )
+        reply = response.choices[0].message.content
+        await update.message.reply_text(reply)
+    except Exception as e:
+        logger.error("ai_chat_failed", error=str(e))
+        await update.message.reply_text("⚠️ Abhi response nahi de paya, dubara try karein.")
+
+
+# ---------------------------------------------------------------------------
+# Core entrypoint for all plain-text (non-command) messages
+# ---------------------------------------------------------------------------
+async def core_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_text = update.message.text or ""
+
+    if _is_admin(update):
+        url_match = URL_REGEX.search(user_text)
+        if url_match:
+            url = url_match.group(0)
+            remainder = (user_text[:url_match.start()] + user_text[url_match.end():]).strip(" -:|\n")
+            await _store_link_from_message(update, url, remainder)
+            return
+
+        intent = await classify_intent(user_text)
+        if intent == "CODE_TASK":
+            await _handle_owner_code_task(update, context, user_text)
+        else:
+            await _handle_ai_chat(update, user_text)
         return
 
-    relative_path = os.path.relpath(filename, os.getcwd())
+    # Non-owner users: pehle stored-links me search karo (movie/anime/document name),
+    # phir fallback AI teaching-assistant
+    found = await _search_and_reply_link(update, user_text)
+    if found:
+        return
 
-    # Network calls background thread mein taaki event loop block na ho
-    threading.Thread(
-        target=_heal_in_background,
-        args=(filename, relative_path, error_msg, original_code),
-        daemon=True,
-    ).start()
-
-
-def ai_autonomous_healer(exc_type, exc_value, exc_traceback):
-    """Synchronous top-level crashes ke liye (sys.excepthook)."""
-    _process_exception(exc_type, exc_value, exc_traceback)
-    sys.__excepthook__(exc_type, exc_value, exc_traceback)
-
-
-def ai_asyncio_exception_handler(loop, context):
-    """
-    Async/coroutine crashes ke liye (FastAPI/uvloop ke andar jo errors aate hain,
-    wo yahan se pakde jaate hain — sys.excepthook se NAHI).
-    """
-    exception = context.get("exception")
-    if exception is not None:
-        _process_exception(type(exception), exception, exception.__traceback__)
-    else:
-        print(f"⚠️ Auto-Healer: Async error bina exception object ke: {context.get('message')}")
-
-    # Default asyncio error logging bhi chalne dein
-    loop.default_exception_handler(context)
-
-
-def setup_auto_healer():
-    """
-    Sirf synchronous/top-level crash hook set karta hai. Yeh module import
-    time par call hoti hai (uvicorn start hone se pehle), isliye abhi
-    actual event loop (uvloop) exist nahi karta — async handler ALAG se
-    register_async_exception_handler() se, FastAPI lifespan ke andar
-    (jab actual loop chal raha ho) call karna zaroori hai.
-    """
-    sys.excepthook = ai_autonomous_healer
-    print("✅ Auto-Healer: Sync exception hook set ho gaya.")
-
-
-def register_async_exception_handler():
-    """
-    FastAPI lifespan ke andar (async context, jab uvloop actually chal raha
-    ho) call karein. asyncio.get_running_loop() use karta hai taaki sahi,
-    actual loop par handler set ho — asyncio.get_event_loop() import-time
-    par galat/discarded loop de sakta tha.
-    """
-    try:
-        import asyncio
-        loop = asyncio.get_running_loop()
-        loop.set_exception_handler(ai_asyncio_exception_handler)
-        print("✅ Auto-Healer: Async exception handler register ho gaya (FastAPI crashes ab catch honge)")
-    except RuntimeError:
-        print("⚠️ Auto-Healer: Koi running event loop nahi mila — async handler register nahi ho paya.")
-    except Exception as e:
-        print(f"⚠️ Auto-Healer: Async exception handler set nahi ho paya: {e}")
+    await _handle_ai_chat(update, user_text)
