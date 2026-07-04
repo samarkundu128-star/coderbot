@@ -1,26 +1,27 @@
-CODE DOCTOR — Startup Diagnostic Scanner
+"""
+CODE DOCTOR - Startup Diagnostic Scanner
 ==========================================
 Ye module koi bhi cheez run ya import NAHI karta (isliye khud crash nahi
 ho sakta). Sirf `ast` ke through poore `src/` ke saare .py files ko
 static parse karta hai aur ye 3 tarah ki problems dhoondta hai:
 
-  1. IMPORT MISMATCH  — `from src.x import y` diya hai, lekin `y` naam
+  1. IMPORT MISMATCH  - `from src.x import y` diya hai, lekin `y` naam
      `src/x.py` ke andar exist hi nahi karta (jaisa pehle ke crashes mein
      hua tha: addlink_command_handler, subscription_recheck_callback_handler, etc.)
 
-  2. ARGUMENT COUNT MISMATCH — function ko jitne arguments diye ja rahe
+  2. ARGUMENT COUNT MISMATCH - function ko jitne arguments diye ja rahe
      hain call site par, wo uski actual definition se match nahi karte.
 
-  3. ASYNC/SYNC MISUSE — kisi sync (non-async) function ko `await` kiya
+  3. ASYNC/SYNC MISUSE - kisi sync (non-async) function ko `await` kiya
      ja raha hai, ya vice-versa.
 
-Isse pura report Render ke logs mein DEPLOY START hote hi dikh jaata hai —
+Isse pura report Render ke logs mein DEPLOY START hote hi dikh jaata hai -
 chahe baad mein Python import-time par crash ho ya na ho. Isse agar koi
 naya mismatch aaye, to exact file + line pehle hi pata chal jayega,
 guess karne ki zaroorat nahi padegi.
 
 Ye function sirf LOG karta hai, kabhi bhi process ko crash ya exit
-nahi karta — production startup ko block nahi karega.
+nahi karta - production startup ko block nahi karega.
 """
 
 import ast
@@ -104,7 +105,7 @@ def run_full_diagnostics() -> dict:
     """
     Poore codebase ko scan karke ek detailed report banata hai aur usse
     structlog ke through print karta hai. Kabhi exception raise nahi
-    karta — koi bhi internal error sirf ek warning ki tarah log hoga.
+    karta - koi bhi internal error sirf ek warning ki tarah log hoga.
 
     Returns: summary dict jisme total files, total issues count, aur
     poori issues list hoti hai (agar caller ko programmatically chahiye ho).
@@ -128,10 +129,10 @@ def run_full_diagnostics() -> dict:
                     source = f.read()
                 tree = ast.parse(source, filename=pf)
             except SyntaxError as e:
-                report["syntax_errors"].append(f"{pf}: line {e.lineno} — {e.msg}")
+                report["syntax_errors"].append(f"{pf}: line {e.lineno} - {e.msg}")
                 continue
             except Exception as e:
-                report["syntax_errors"].append(f"{pf}: could not parse — {e}")
+                report["syntax_errors"].append(f"{pf}: could not parse - {e}")
                 continue
 
             imported_from = {}
@@ -141,14 +142,14 @@ def run_full_diagnostics() -> dict:
                     modfile = _modpath_to_file(node.module)
                     if modfile is None:
                         report["import_mismatches"].append(
-                            f"{pf}: imports from module '{node.module}' — file not found on disk"
+                            f"{pf}: imports from module '{node.module}' - file not found on disk"
                         )
                         continue
                     if modfile not in module_cache:
                         try:
                             module_cache[modfile] = _get_module_defs(modfile)
                         except Exception as e:
-                            report["syntax_errors"].append(f"{modfile}: could not parse — {e}")
+                            report["syntax_errors"].append(f"{modfile}: could not parse - {e}")
                             module_cache[modfile] = ({}, set())
                     func_sigs, all_names = module_cache[modfile]
 
@@ -160,7 +161,7 @@ def run_full_diagnostics() -> dict:
                         if name not in all_names:
                             report["import_mismatches"].append(
                                 f"{pf} (line {node.lineno}): imports '{name}' from '{node.module}' "
-                                f"({modfile}) — NAME NOT FOUND. Available names: "
+                                f"({modfile}) - NAME NOT FOUND. Available names: "
                                 f"{', '.join(sorted(all_names)) or '(none)'}"
                             )
                         else:
@@ -207,7 +208,7 @@ def run_full_diagnostics() -> dict:
 
     # --- Ab poori report ko clearly logs mein print karte hain ---
     logger.info(
-        "🩺 CODE DOCTOR — startup scan complete",
+        "🩺 CODE DOCTOR - startup scan complete",
         files_scanned=report["files_scanned"],
         total_issues=total_issues,
     )
@@ -226,7 +227,7 @@ def run_full_diagnostics() -> dict:
         logger.error("🩺 CODE DOCTOR [ASYNC/SYNC MISUSE]", detail=item)
 
     logger.warning(
-        f"🩺 CODE DOCTOR: Total {total_issues} problem(s) mile — upar detail logs mein dekho."
+        f"🩺 CODE DOCTOR: Total {total_issues} problem(s) mile - upar detail logs mein dekho."
     )
 
     return report
