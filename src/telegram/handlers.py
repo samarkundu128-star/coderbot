@@ -106,7 +106,7 @@ async def _handle_ai_chat(update: Update, user_text: str):
 
 
 # ---------------------------------------------------------------------------
-# NEW: Automation Ads Bypass Logic & Inline Button Clicks
+# Website Ads Bypass Logic & Inline Button Clicks
 # ---------------------------------------------------------------------------
 async def _bypass_website_ads_engine(original_url: str, quality: str) -> str:
     """Background scraper/bypasser to clean shortener pages and fetch source url."""
