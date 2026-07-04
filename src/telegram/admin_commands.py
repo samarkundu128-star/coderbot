@@ -13,14 +13,7 @@ from src.services.website_sync_service import sync_website_links
 logger = structlog.get_logger(__name__)
 
 github_client = Github(settings.GITHUB_TOKEN.get_secret_value())
-
-# Apna khud ka Groq client (handlers.py par depend nahi karta, kisi bhi naam ka
-# variable ho ya na ho wahan — is file ko standalone rakha hai)
 groq_client = Groq(api_key=settings.GROQ_API_KEY.get_secret_value())
-
-# NOTE: llama3-70b-8192, llama-3.3-70b-versatile, aur llama-3.1-8b-instant sab
-# Groq dwara deprecate ho chuke hain (last update: 17 June 2026). Current
-# recommended high-quality model: openai/gpt-oss-120b
 GROQ_MODEL = "openai/gpt-oss-120b"
 
 SELF_MODIFY_SYSTEM_PROMPT = """You are an elite Python developer editing an existing source file.
@@ -28,20 +21,7 @@ You will be given the CURRENT FULL CONTENT of a file and an INSTRUCTION describi
 feature to add.
 
 Return ONLY the complete, updated file content — nothing else. No markdown fences, no explanation,
-no commentary before or after. The output must be a fully valid, runnable replacement for the
-entire file, preserving all existing functionality unless the instruction explicitly asks to
-remove or change it.
-"""
-
-NEW_FILE_SYSTEM_PROMPT = """You are an elite Python developer creating a brand new source file for
-a FastAPI + python-telegram-bot (v21.3) project that uses the Groq SDK for AI features.
-
-You will be given a FILE PATH and an INSTRUCTION describing what this new file should contain.
-
-Return ONLY the complete file content — nothing else. No markdown fences, no explanation, no
-commentary before or after. The output must be fully valid, runnable Python code that follows
-standard conventions for this stack (async def handlers using `Update` and
-`ContextTypes.DEFAULT_TYPE` for Telegram command handlers, structlog for logging, etc).
+no commentary before or after.
 """
 
 
@@ -50,228 +30,98 @@ def _is_admin(update: Update) -> bool:
 
 
 async def upgrade_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Admin-only command to self-modify the bot's codebase.
-
-    Usage:
-        /upgrade <file_path> | <instructions>
-
-    Example:
-        /upgrade src/telegram/handlers.py | ek naya /joke command add karo
-    """
+    """Admin-only: Reads file path and prompts AI tool to refactor code on GitHub."""
     if not _is_admin(update):
-        logger.warning(
-            "Unauthorized /upgrade attempt blocked",
-            user_id=update.effective_user.id if update.effective_user else None,
-        )
         await update.message.reply_text("⛔ Yeh command sirf bot owner use kar sakta hai.")
         return
 
-    raw_text = " ".join(context.args) if context.args else ""
-
-    if "|" not in raw_text:
-        await update.message.reply_text(
-            "⚠️ Format galat hai. Sahi format:\n\n"
-            "`/upgrade <file_path> | <instructions>`\n\n"
-            "Example:\n"
-            "`/upgrade src/telegram/handlers.py | ek naya /joke command add karo`",
-            parse_mode="Markdown",
-        )
+    full_text = " ".join(context.args) if context.args else ""
+    if "|" not in full_text:
+        await update.message.reply_text("❌ Usage: `/upgrade <file_path> | <instructions>`", parse_mode="Markdown")
         return
 
-    file_path, instructions = raw_text.split("|", 1)
-    file_path = file_path.strip()
-    instructions = instructions.strip()
+    path_part, instruction = full_text.split("|", 1)
+    file_path = path_part.strip()
+    instruction = instruction.strip()
 
-    if not file_path or not instructions:
-        await update.message.reply_text("⚠️ File path aur instructions dono zaroori hain.")
-        return
-
-    status_msg = await update.message.reply_text(f"🔧 `{file_path}` check kar raha hoon GitHub par...", parse_mode="Markdown")
+    status_msg = await update.message.reply_text(f"📦 GitHub se `{file_path}` fetch kar raha hoon...", parse_mode="Markdown")
 
     try:
-        repo = github_client.get_repo(settings.REPO_NAME)
+        repo = github_client.get_repo(settings.GITHUB_REPO)
+        contents = repo.get_contents(file_path)
+        current_content = contents.decoded_content.decode("utf-8")
 
-        # Step 1: Check karein file exist karti hai ya naya banani hai
-        file_exists = True
-        current_content = ""
-        file_sha = None
+        await status_msg.edit_text("🧠 Groq AI dwara file content refactor kiya ja raha hai...")
 
-        try:
-            file_obj = repo.get_contents(file_path)
-            current_content = file_obj.decoded_content.decode("utf-8")
-            file_sha = file_obj.sha
-        except GithubException:
-            file_exists = False
-
-        if file_exists:
-            await status_msg.edit_text("🤖 Groq AI existing code update kar raha hai...")
-            response = await _generate_updated_code(current_content, instructions)
-        else:
-            await status_msg.edit_text(f"🆕 `{file_path}` nayi file hai — Groq AI se create karwa raha hoon...", parse_mode="Markdown")
-            response = await _generate_new_file(file_path, instructions)
-
-        if not response or not response.strip():
-            await status_msg.edit_text("⚠️ AI ne khaali response diya. Dubara try karein.")
-            return
-
-        # Safety: agar AI ne instructions ignore karke markdown fences laga di hon, hata dein
-        response = response.strip()
-        if response.startswith("```"):
-            lines = response.split("\n")
-            response = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
-
-        # Step 2: GitHub par commit karein (naya file ya existing update, dono handle)
-        await status_msg.edit_text("📤 GitHub par commit kar raha hoon...")
-
-        if file_exists:
-            repo.update_file(
-                path=file_path,
-                message=f"🤖 Auto-upgrade via /upgrade: {instructions[:60]}",
-                content=response,
-                sha=file_sha,
-            )
-        else:
-            repo.create_file(
-                path=file_path,
-                message=f"🤖 Auto-create via /upgrade: {instructions[:60]}",
-                content=response,
-            )
-
-        action_word = "update" if file_exists else "create"
-        await status_msg.edit_text(
-            f"✅ `{file_path}` successfully {action_word} ho gaya!\n\n"
-            "Render 1-2 minute mein automatically naya deploy start kar dega.\n\n"
-            + ("⚠️ Naya command hai toh usse `main.py` mein register karna na bhoolein "
-               "(alag `/upgrade` command se) taaki Telegram wo command samjh sake!" if not file_exists else ""),
-            parse_mode="Markdown",
+        response = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": SELF_MODIFY_SYSTEM_PROMPT},
+                {"role": "user", "content": f"=== CURRENT CONTENT OF {file_path} ===\n{current_content}\n\n=== INSTRUCTION ===\n{instruction}"}
+            ],
+            temperature=0.1
         )
-        logger.info("Self-modify commit successful", file=file_path, action=action_word, instructions=instructions)
+
+        updated_code = response.choices[0].message.content.strip()
+        if updated_code.startswith("```"):
+            lines = updated_code.splitlines()
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines[-1].startswith("```"):
+                lines = lines[:-1]
+            updated_code = "\n".join(lines).strip()
+
+        await status_msg.edit_text("📤 Code modification completed. Pushing change back to GitHub...")
+        repo.update_file(contents.path, f"Self-upgrade: {file_path}", updated_code, contents.sha)
+        await status_msg.edit_text(f"✅ **Success!** `{file_path}` safely modified and pushed to main branch. Deployment tracking will trigger shortly.", parse_mode="Markdown")
 
     except GithubException as ge:
-        logger.error("GitHub commit failed", error=str(ge))
-        await status_msg.edit_text(f"❌ GitHub error: {str(ge)}")
+        await status_msg.edit_text(f"❌ **GitHub Error:** {ge.data.get('message', str(ge))}")
     except Exception as e:
-        logger.error("upgrade_command_handler failed", error=str(e))
-        await status_msg.edit_text(f"❌ Kuch galat ho gaya: {str(e)}")
-
-
-async def _generate_new_file(file_path: str, instructions: str) -> str:
-    """Naya file content Groq se generate karwata hai (scratch se)."""
-    import asyncio
-
-    user_prompt = f"FILE PATH: {file_path}\n\nINSTRUCTION:\n{instructions}"
-
-    completion = await asyncio.to_thread(
-        groq_client.chat.completions.create,
-        model=GROQ_MODEL,
-        messages=[
-            {"role": "system", "content": NEW_FILE_SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.2,
-        max_tokens=4096,
-    )
-    return completion.choices[0].message.content
-
-
-async def _generate_updated_code(current_content: str, instructions: str) -> str:
-    """Groq API ko synchronous SDK ke sath thread mein call karta hai."""
-    import asyncio
-
-    user_prompt = (
-        f"CURRENT FILE CONTENT:\n{current_content}\n\n"
-        f"INSTRUCTION:\n{instructions}"
-    )
-
-    completion = await asyncio.to_thread(
-        groq_client.chat.completions.create,
-        model=GROQ_MODEL,
-        messages=[
-            {"role": "system", "content": SELF_MODIFY_SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.2,
-        max_tokens=4096,
-    )
-    return completion.choices[0].message.content
+        await status_msg.edit_text(f"❌ **Upgrade System Fail:** {str(e)}")
 
 
 async def restart_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Admin-only: bot process ko turant restart karta hai. Render (ya entrypoint.sh
-    supervisor, agar wired hai) exit hote hi process ko automatically wapas launch
-    kar deta hai — isliye downtime sirf kuch second ka hota hai.
-    """
+    """Admin-only: immediately kills process so process managers boot fresh image."""
+    if not _is_admin(update):
+        await update.message.reply_text("⛔ Yeh command sirf bot owner use kar sakta hai.")
+        return
+    await update.message.reply_text("🔄 Bot application ko force restart kiya ja raha hai...")
+    os._exit(0)
+
+
+async def add_link_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only: Manually insert item inside repository."""
     if not _is_admin(update):
         await update.message.reply_text("⛔ Yeh command sirf bot owner use kar sakta hai.")
         return
 
-    await update.message.reply_text("🔄 Bot restart ho raha hai... kuch second me wapas online hoga.")
-    logger.warning("Manual restart triggered via /restart command", user_id=update.effective_user.id)
-    os._exit(1)  # Process ko turant terminate karta hai; Render/supervisor ise auto-restart kar dega
-
-
-async def addlink_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Admin-only: /addlink <name> | <url>
-    Owner ke pass agar URL me hi naam nahi hai (ya explicit control chahiye), toh
-    is command se manually bhi add kar sakte hain. Plain message me URL bhejna
-    (core_message_handler) bhi automatically save kar deta hai.
-    """
-    if not _is_admin(update):
-        await update.message.reply_text("⛔ Yeh command sirf bot owner use kar sakta hai.")
+    full_text = " ".join(context.args) if context.args else ""
+    if "|" not in full_text:
+        await update.message.reply_text("❌ Usage: `/addlink <name> | <url>`", parse_mode="Markdown")
         return
 
-    raw_text = " ".join(context.args) if context.args else ""
-    if "|" not in raw_text:
-        await update.message.reply_text(
-            "⚠️ Format: `/addlink <name> | <url>`\n\nExample:\n`/addlink Naruto Episode 1 | https://example.com/ep1`",
-            parse_mode="Markdown",
-        )
-        return
-
-    name, url = raw_text.split("|", 1)
-    name, url = name.strip(), url.strip()
-
-    if not name or not url:
-        await update.message.reply_text("⚠️ Name aur URL dono zaroori hain.")
-        return
+    name_part, url_part = full_text.split("|", 1)
+    name = name_part.strip()
+    url = url_part.strip()
 
     async with AsyncSessionLocal() as session:
         repo = LinkRepository(session)
         await repo.add_link(name=name, url=url, added_by=update.effective_user.id)
         await session.commit()
 
-    await update.message.reply_text(f"🔗 Link save ho gaya: *{name}*", parse_mode="Markdown")
+    await update.message.reply_text(f"✅ **Manually Added Link:**\n🎬 *Name:* {name}\n🔗 *URL:* {url}", parse_mode="Markdown")
 
 
 async def sync_website_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Admin-only: /syncwebsite <optional website_url>
-
-    - /syncwebsite                      → settings.WEBSITE_URL (env var) scan karta hai
-    - /syncwebsite https://example.com  → koi bhi diya gaya website scan karta hai
-
-    Jo bhi website do, uske saare <a> tag download links dhoond ke database me
-    store kar deta hai (naam anchor text se milta hai). Jitni baar chaho, jitni
-    alag websites chaho, sab isi ek command se chal jayenga.
-    """
+    """Admin-only: Scan dedicated domain and push contents automatically into internal records."""
     if not _is_admin(update):
         await update.message.reply_text("⛔ Yeh command sirf bot owner use kar sakta hai.")
         return
 
-    target_url = context.args[0].strip() if context.args else settings.WEBSITE_URL
-
+    target_url = context.args[0] if context.args else settings.WEBSITE_URL
     if not target_url:
-        await update.message.reply_text(
-            "⚠️ Koi website URL nahi mila.\n\n"
-            "Usage: `/syncwebsite <website_url>`\n"
-            "Example: `/syncwebsite https://example.com`\n\n"
-            "Ya `WEBSITE_URL` environment variable set kar do — tab bina URL diye "
-            "bhi `/syncwebsite` chal jayega.",
-            parse_mode="Markdown",
-        )
+        await update.message.reply_text("❌ Koi URL specified nahi hai aur settings me WEBSITE_URL khali hai.")
         return
 
     status_msg = await update.message.reply_text(f"🌐 `{target_url}` scan kar raha hoon...", parse_mode="Markdown")
@@ -290,8 +140,8 @@ async def sync_website_command_handler(update: Update, context: ContextTypes.DEF
         await status_msg.edit_text(f"❌ Website scan fail ho gaya: {str(e)}")
 
 
-async def list_links_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin-only: recently saved links dikhata hai."""
+async def list_recent_links_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only: recently saved links dikhata hai. Ab ye /recentlinks se chalega."""
     if not _is_admin(update):
         await update.message.reply_text("⛔ Yeh command sirf bot owner use kar sakta hai.")
         return
