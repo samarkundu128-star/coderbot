@@ -34,7 +34,7 @@ from src.telegram.handlers import core_message_handler, quality_button_callback_
 from src.telegram.admin_commands import (
     upgrade_command_handler,
     restart_command_handler,
-    addlink_command_handler,
+    add_link_command_handler,
     list_recent_links_command_handler,
     sync_website_command_handler,
 )
@@ -101,7 +101,7 @@ def build_telegram_application() -> Application:
     # --------------------------------------------------------------------------
     application.add_handler(CommandHandler("upgrade", upgrade_command_handler))
     application.add_handler(CommandHandler("restart", restart_command_handler))
-    application.add_handler(CommandHandler("addlink", addlink_command_handler))
+    application.add_handler(CommandHandler("addlink", add_link_command_handler))
     application.add_handler(CommandHandler("syncwebsite", sync_website_command_handler))
     application.add_handler(CommandHandler("getlinks", getlinks_command_handler))
     application.add_handler(CommandHandler("recentlinks", list_recent_links_command_handler))
