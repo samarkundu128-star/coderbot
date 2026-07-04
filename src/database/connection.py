@@ -1,4 +1,6 @@
 import sys
+import socket
+from urllib.parse import urlsplit
 from typing import AsyncGenerator
 import structlog
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
@@ -21,6 +23,42 @@ elif "postgresql+psycopg2://" in raw_url:
     db_url = raw_url.replace("postgresql+psycopg2://", "postgresql+asyncpg://", 1)
 else:
     db_url = raw_url
+# ---------------------------------------------
+
+# --- DEEP DEBUG: exact hostname jo Python ko mil raha hai wo dikhate hain (repr()
+# ke saath, taaki hidden/invisible characters bhi escape-sequence ki tarah dikh
+# jaayein), aur DNS resolution manually try karke exact result/error print karte hain.
+# Password ko hamesha *** se mask karke rakha jaata hai logs me. ---
+try:
+    parsed = urlsplit(db_url.replace("postgresql+asyncpg://", "postgresql://", 1))
+    hostname = parsed.hostname
+    port = parsed.port or 5432
+
+    logger.warning(
+        "DATABASE_URL DEBUG — parsed hostname",
+        hostname_repr=repr(hostname),
+        hostname_length=len(hostname) if hostname else 0,
+        port=port,
+        username=parsed.username,
+        dbname=parsed.path.lstrip("/") if parsed.path else None,
+    )
+
+    if hostname:
+        try:
+            resolved = socket.getaddrinfo(hostname, port)
+            logger.warning(
+                "DATABASE_URL DEBUG — DNS resolution SUCCESS",
+                hostname=hostname,
+                resolved_ips=[r[4][0] for r in resolved][:3],
+            )
+        except socket.gaierror as dns_err:
+            logger.error(
+                "DATABASE_URL DEBUG — DNS resolution FAILED",
+                hostname_repr=repr(hostname),
+                error=str(dns_err),
+            )
+except Exception as debug_err:
+    logger.warning("DATABASE_URL DEBUG block itself failed", error=str(debug_err))
 # ---------------------------------------------
 
 try:
