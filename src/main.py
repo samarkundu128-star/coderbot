@@ -40,7 +40,7 @@ from src.telegram.admin_commands import (
 )
 from src.telegram.scraper_commands import getlinks_command_handler
 from src.services.website_sync_service import sync_website_links
-from src.telegram.middleware import run_global_middleware, subscription_recheck_callback_handler
+from src.telegram.middleware import run_global_middleware, subscription_recheck_callback
 
 logger = structlog.get_logger(__name__)
 
@@ -77,7 +77,7 @@ def build_telegram_application() -> Application:
     # SUBSCRIPTION/CHANNEL FORCE RE-CHECK CALLBACK
     # --------------------------------------------------------------------------
     application.add_handler(
-        CallbackQueryHandler(subscription_recheck_callback_handler, pattern="^recheck_subscription$")
+        CallbackQueryHandler(subscription_recheck_callback, pattern="^recheck_subscription$")
     )
 
     # --------------------------------------------------------------------------
