@@ -1,5 +1,3 @@
-
-"""
 CODE DOCTOR — Startup Diagnostic Scanner
 ==========================================
 Ye module koi bhi cheez run ya import NAHI karta (isliye khud crash nahi
