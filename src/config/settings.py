@@ -14,12 +14,13 @@ class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN: SecretStr
     WEBHOOK_URL: str
     WEBHOOK_SECRET_TOKEN: SecretStr
+    WEBHOOK_ENABLED: bool = True
 
     # --- Auto-Healer (GitHub + Render) ---
     GITHUB_TOKEN: SecretStr
     REPO_NAME: str
 
-    # --- Admin control (self-modify command ke liye — SIRF yahi ID command chala payega) ---
+    # --- Admin control (self-modify command ke liye - SIRF yahi ID command chala payega) ---
     ADMIN_TELEGRAM_ID: int
 
     # --- Runtime info (health check ke liye) ---
@@ -70,7 +71,7 @@ class Settings(BaseSettings):
         if v != original:
             import structlog
             structlog.get_logger(__name__).warning(
-                "DATABASE_URL mein invalid/hidden characters mile — auto-cleaned.",
+                "DATABASE_URL mein invalid/hidden characters mile - auto-cleaned.",
                 original_length=len(original),
                 cleaned_length=len(v),
             )
