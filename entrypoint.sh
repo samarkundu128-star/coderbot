@@ -73,7 +73,7 @@ while true; do
         --host "$HOST" \
         --port "$PORT" \
         --workers 1 \
-        --loop uvloop \
+        --loop asyncio \
         --log-level info &
 
     UVICORN_PID=$!
