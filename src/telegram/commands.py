@@ -2,7 +2,7 @@ from telegram import Update, constants, InlineKeyboardButton, InlineKeyboardMark
 from telegram.ext import CallbackContext
 from src.config.settings import settings
 from src.database.connection import AsyncSessionLocal
-from src.database.repository import ChatRepository, ProjectRepository
+from src.database.repository import ChatRepository, ProjectRepository, LinkRepository
 
 
 def _footer_markup():
@@ -21,15 +21,12 @@ async def start_command(update: Update, context: CallbackContext) -> None:
     first_name = update.effective_user.first_name if update.effective_user else "Coder"
     welcome_text = (
         f"👋 *Welcome, {first_name}!*\n\n"
-        "🚀 *AI Coding Gateway* — apni jeb me ek AI developer.\n\n"
-        "Bas normal bhasha me apna coding task likhein, AI turant runnable code "
-        "generate kar deta hai — bina IDE khole, bina setup jhanjhat ke.\n\n"
-        "*Quick Commands:*\n"
-        "⚡ `/do <task>` — turant code generate karein\n"
-        "📂 `/newproject <name>` — naya project shuru karein\n"
-        "🧹 `/clear` — chat history reset karein\n"
-        "💡 `/help` — poori guide dekhein\n\n"
-        "_Kisi bhi cheez ke baare me seedha type karke pooch sakte hain — main sun raha hoon!_"
+        "🎬 *Movie & Anime Downloader Bot* 🚀\n\n"
+        "Ab aapko ads ke jhanjhat me padne ki zaroorat nahi! Bas niche diye gaye tarike se search karein:\n\n"
+        "🔍 *Kaise Search Karein:*\n"
+        "⚡ `/links <movie_ya_anime_ka_naam>`\n"
+        "Example: `/links Naruto` ya `/links Avengers`\n\n"
+        "💡 Baaki commands dekhne ke liye `/help` dabayein."
     )
     await update.effective_chat.send_message(
         text=welcome_text,
@@ -39,36 +36,80 @@ async def start_command(update: Update, context: CallbackContext) -> None:
 
 
 async def help_command(update: Update, context: CallbackContext) -> None:
-    """Detailed, categorized user guide."""
+    """Detailed, categorized user guide with global user instructions."""
     is_admin = update.effective_user is not None and update.effective_user.id == settings.ADMIN_TELEGRAM_ID
 
     help_text = (
-        "📖 *Coderbot — Complete Guide*\n\n"
-        "*🧑‍💻 Har koi kya kar sakta hai:*\n"
-        "• `/start` — welcome menu\n"
-        "• `/do <task>` — AI se ek-shot code generate karayein\n"
-        "  _example:_ `/do python mein calculator banao`\n"
-        "• `/newproject <name>` — naya isolated project banayein\n"
-        "• `/clear` — apni chat history erase karein\n"
-        "• Seedha type bhi kar sakte hain — koi bhi sawaal, guidance, ya feature "
-        "kaise use karein, sab yahan pooch sakte hain\n"
+        "📖 *Bot Usage Guide — Users Ke Liye*\n\n"
+        "🤖 **Bot Se Download Kaise Karein?**\n"
+        "1️⃣ Type karein: `/links <naam>` (Example: `/links Naruto`)\n"
+        "2️⃣ Bot aapko us movie/anime ki available qualities dikhaega.\n"
+        "3️⃣ Apni pasand ki quality (480p, 720p, 1080p) ke button par click karein.\n"
+        "4️⃣ Bot background me saare ads ko bypass karke aapko **Direct Download Link** de dega!\n\n"
+        "📌 **Bypass Ke Baad Kya Karein?**\n"
+        "• Direct Link par click karte hi agar browser me koi doosra pop-up page khule, toh use turant back/close kar dein aur wapas original page par 'Download Now' par click karein."
     )
 
     if is_admin:
         help_text += (
-            "\n*🔐 Owner-only Commands:*\n"
-            "• `/upgrade <file_path> | <instructions>` — kisi specific file ko directly modify karein\n"
-            "• `/restart` — bot process ko turant restart karein\n"
-            "• `/addlink <name> | <url>` — ek download link store karein (ya bas URL wala message bhej dein)\n"
-            "• `/links` — recently saved links dekhein\n"
-            "• Seedha natural language me bol kar bhi poora bot modify/upgrade kara sakte hain — "
-            "AI khud samajh lega ki yeh sirf chat hai ya code-change ka request, aur push+deploy "
-            "hone ke baad aapko khud inform kar dega.\n"
+            "\n\n*🔐 Owner-only Commands:*\n"
+            "• `/upgrade <file_path> | <instructions>` — modify codebase\n"
+            "• `/restart` — bot process restart\n"
+            "• `/addlink <name> | <url>` — manual link add\n"
+            "• `/syncwebsite <url>` — website se saare links automatic uthana\n"
+            "• `/recentlinks` — recently saved 20 links dekhna\n"
+            "• `/do <task>` — AI code generation utility\n"
         )
 
     await update.effective_chat.send_message(
         text=help_text, parse_mode=constants.ParseMode.MARKDOWN, reply_markup=_footer_markup()
     )
+
+
+async def links_command(update: Update, context: CallbackContext) -> None:
+    """
+    Public Command: Saare users ke liye database se links bina kisi limit ke dhoondta hai.
+    Usage: /links <movie_ya_anime_ka_naam>
+    """
+    query = " ".join(context.args) if context.args else ""
+    
+    if not query.strip():
+        await update.message.reply_text(
+            "⚠️ **Sahi Format:** `/links <naam>`\n"
+            "Example: `/links Naruto` ya `/links Avengers`"
+        )
+        return
+
+    async with AsyncSessionLocal() as session:
+        repo = LinkRepository(session)
+        matches = await repo.search(query)
+
+    if not matches:
+        await update.message.reply_text(
+            "😔 Maaf kijiyega, is naam ka koi link nahi mila.\n"
+            "Admin jald hi ise update karke website se sync kar dega!"
+        )
+        return
+
+    await update.message.reply_text(
+        f"🔎 *{len(matches)} results* mile hain! Niche se quality select karein:", 
+        parse_mode=constants.ParseMode.MARKDOWN
+    )
+
+    for m in matches:
+        keyboard = [
+            [
+                InlineKeyboardButton("🎥 480p", callback_data=f"bypass_{m.id}_480p"),
+                InlineKeyboardButton("🎥 720p", callback_data=f"bypass_{m.id}_720p"),
+                InlineKeyboardButton("🎥 1080p", callback_data=f"bypass_{m.id}_1080p")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            f"🎬 *{m.name}*", 
+            parse_mode=constants.ParseMode.MARKDOWN, 
+            reply_markup=reply_markup
+        )
 
 
 async def clear_command(update: Update, context: CallbackContext) -> None:
@@ -78,13 +119,13 @@ async def clear_command(update: Update, context: CallbackContext) -> None:
         chat_repo = ChatRepository(session)
         await chat_repo.clear_history(chat_id)
         await session.commit()
-    await update.effective_chat.send_message(text="🧹 **Success:** Aapki purani conversation history session delete ho gayi hai.")
+    await update.effective_chat.send_message(text=\"🧹 **Success:** Aapki purani conversation history session delete ho gayi hai.\")
 
 
 async def newproject_command(update: Update, context: CallbackContext) -> None:
     """Naya folder/project tracking context shuru karne ke liye."""
     if not context.args:
-        await update.effective_chat.send_message(text="❌ **Usage:** `/newproject <project_name>`")
+        await update.effective_chat.send_message(text=\"❌ **Usage:** `/newproject <project_name>`\")
         return
 
     project_name = " ".join(context.args)
@@ -94,8 +135,7 @@ async def newproject_command(update: Update, context: CallbackContext) -> None:
         proj_repo = ProjectRepository(session)
         project = await proj_repo.create_project(telegram_id=tg_id, name=project_name)
         await session.commit()
-        p_id = project.id
 
     await update.effective_chat.send_message(
-        text=f"📂 **Project Active:** Naya project `{project_name}` (ID: `{p_id}`) database me allocate ho chuka hai!"
+        text=f"📂 **Project Active:** Naya project `{project_name}` allocate ho chuka hai!"
     )
