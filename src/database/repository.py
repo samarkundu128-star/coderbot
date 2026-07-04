@@ -98,6 +98,33 @@ class LinkRepository(BaseRepository):
         await self.session.flush()
         return link
 
+    async def url_exists(self, url: str) -> bool:
+        """Website auto-sync ke liye — dobara restart/sync hone par duplicate links na banein."""
+        stmt = select(LinkAsset).where(LinkAsset.url == url.strip())
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none() is not None
+
+    async def bulk_add_links(self, items: List[Dict[str, str]], added_by: int) -> int:
+        """
+        items: [{"name": ..., "url": ...}, ...]
+        Sirf woh links add karta hai jo already database me nahi hain (URL ke basis par).
+        Returns: kitne naye links add hue.
+        """
+        added_count = 0
+        for item in items:
+            name = (item.get("name") or "").strip()
+            url = (item.get("url") or "").strip()
+            if not name or not url:
+                continue
+            if await self.url_exists(url):
+                continue
+            link = LinkAsset(name=name[:500], url=url, added_by=added_by)
+            self.session.add(link)
+            added_count += 1
+        if added_count:
+            await self.session.flush()
+        return added_count
+
     async def search(self, query: str, limit: int = 5) -> List[LinkAsset]:
         # Simple case-insensitive substring match (dono direction: query name ke andar,
         # ya name query ke andar — chhote/bade dono tarah ke matches pakadta hai)
