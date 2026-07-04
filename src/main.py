@@ -203,6 +203,19 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+@app.get("/", status_code=status.HTTP_200_OK)
+@app.head("/", status_code=status.HTTP_200_OK)
+async def root():
+    """
+    Render (aur baaki external monitors/uptime-checkers) default root path '/'
+    par HEAD/GET ping karte hain. Pehle koi route define nahi tha yahan, isliye
+    logs me har baar '404 Not Found' aata tha — harmless tha, lekin logs saaf
+    rakhne aur monitoring tools ko sahi 200 OK milta rahe, isliye ye route add
+    kiya gaya hai.
+    """
+    return {"status": "ok", "service": "coderbot", "environment": settings.ENVIRONMENT}
+
+
 @app.get("/health", status_code=status.HTTP_200_OK)
 async def health_check():
     return {"status": "healthy", "environment": settings.ENVIRONMENT}
@@ -236,4 +249,19 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=port,
         reload=False,  # production mein reload=True mat rakhein (extra process overhead)
+        # --- IMPORTANT: uvloop DISABLE kiya gaya hai ---
+        # requirements.txt me uvloop kahi seedha mention nahi hai, lekin FastAPI ke
+        # transitive dependencies (fastapi-cli/uvicorn[standard]) ke through wo
+        # install ho jaata hai. uvicorn ka default `loop="auto"` uvloop ko hi pick
+        # kar leta hai agar wo installed ho. Problem ye hai ki uvloop ki apni
+        # `Loop` class Python ke standard `asyncio.base_events.BaseEventLoop` se
+        # inherit NAHI karti — isliye humara `getaddrinfo` DNS-fix monkeypatch
+        # (jo connection.py me hai) uvloop par bilkul asar nahi karta tha, aur
+        # Supabase DB connect karte waqt consistently "[Errno -2] Name or service
+        # not known" (gaierror) aata rehta tha, chahe hostname ho ya IP.
+        # Standard asyncio loop force karne se ye poori tarah avoid ho jaata hai,
+        # kyunki humara monkeypatch (aur main-thread DNS resolution jo hamesha
+        # reliably kaam karta hai) sirf asyncio ke standard event loop par hi
+        # effective hai.
+        loop="asyncio",
     )
