@@ -1,7 +1,7 @@
 import sys
 import asyncio
 import socket
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 from typing import AsyncGenerator
 import structlog
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
@@ -26,10 +26,21 @@ else:
     db_url = raw_url
 # ---------------------------------------------
 
-# --- DEEP DEBUG: exact hostname jo Python ko mil raha hai wo dikhate hain (repr()
-# ke saath, taaki hidden/invisible characters bhi escape-sequence ki tarah dikh
-# jaayein), aur DNS resolution manually try karke exact result/error print karte hain.
-# Password ko hamesha *** se mask karke rakha jaata hai logs me. ---
+# --- DEEP DEBUG + IP PRE-RESOLUTION ---
+# Render jaise sandboxed containers me ek strange-lekin-known behavior dekha gaya:
+# hostname jab MAIN THREAD se synchronously resolve kiya jata hai (jaise yahan
+# neeche), toh hamesha successfully resolve hota hai. Lekin jab wahi hostname
+# baad me asyncio ke background thread-pool executor se (jo asyncpg internally
+# `loop.getaddrinfo()` ke through use karta hai) resolve hone ki koshish hoti
+# hai, wo consistently "[Errno -2] Name or service not known" de kar fail ho
+# jaata hai — chahe kitni bhi baar retry karo.
+#
+# Fix: hostname ko yahin, main thread par, ek baar reliably resolve karke uski
+# IP address seedha DB connection URL me daal dete hain. Numeric IP ke liye
+# getaddrinfo() koi real DNS/network query nahi karta (locally hi resolve ho
+# jaata hai), isliye runtime par asyncpg/asyncio ko dobara DNS lookup karne ki
+# zaroorat hi nahi padti — aur wo problematic background-thread DNS path
+# poori tarah bypass ho jaata hai.
 try:
     parsed = urlsplit(db_url.replace("postgresql+asyncpg://", "postgresql://", 1))
     hostname = parsed.hostname
@@ -46,20 +57,34 @@ try:
 
     if hostname:
         try:
-            resolved = socket.getaddrinfo(hostname, port)
+            resolved = socket.getaddrinfo(hostname, port, family=socket.AF_INET)
+            resolved_ip = resolved[0][4][0]
             logger.warning(
-                "DATABASE_URL DEBUG — DNS resolution SUCCESS",
+                "DATABASE_URL DEBUG — DNS resolution SUCCESS, IP ko URL me inject kar rahe hain",
                 hostname=hostname,
-                resolved_ips=[r[4][0] for r in resolved][:3],
+                resolved_ip=resolved_ip,
             )
+
+            # Netloc rebuild karte hain: hostname ki jagah resolved IP, baaki
+            # (username, password, port) bilkul waise hi rakhte hain.
+            userinfo = ""
+            if parsed.username:
+                userinfo = parsed.username
+                if parsed.password:
+                    userinfo += f":{parsed.password}"
+                userinfo += "@"
+            new_netloc = f"{userinfo}{resolved_ip}:{port}"
+            new_parsed = parsed._replace(netloc=new_netloc)
+            resolved_plain_url = urlunsplit(new_parsed)
+            db_url = resolved_plain_url.replace("postgresql://", "postgresql+asyncpg://", 1)
         except socket.gaierror as dns_err:
             logger.error(
-                "DATABASE_URL DEBUG — DNS resolution FAILED",
+                "DATABASE_URL DEBUG — DNS resolution FAILED, original hostname hi use karenge",
                 hostname_repr=repr(hostname),
                 error=str(dns_err),
             )
 except Exception as debug_err:
-    logger.warning("DATABASE_URL DEBUG block itself failed", error=str(debug_err))
+    logger.warning("DATABASE_URL DEBUG/IP-resolution block itself failed — original db_url hi use karenge", error=str(debug_err))
 # ---------------------------------------------
 
 try:
