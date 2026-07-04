@@ -112,6 +112,24 @@ except Exception as debug_err:
 
 try:
     # Supabase PostgreSQL se asynchronous engine connect kar rahe hain
+
+    # --- FINAL CONFIRMATION LOG: SQLAlchemy khud is db_url ko kaise parse
+    # karega, wahi yahan dikhate hain — taaki 100% confirm ho ki asyncpg ko
+    # kaunsa exact host milne wala hai (hostname ya IP), guesswork nahi. ---
+    try:
+        from sqlalchemy.engine.url import make_url
+        _sa_url = make_url(db_url)
+        logger.warning(
+            "FINAL CHECK — SQLAlchemy engine ko ye exact host milega",
+            final_host_repr=repr(_sa_url.host),
+            final_port=_sa_url.port,
+            final_database=_sa_url.database,
+            final_username=_sa_url.username,
+            final_drivername=_sa_url.drivername,
+        )
+    except Exception as final_check_err:
+        logger.warning("FINAL CHECK block fail ho gaya", error=str(final_check_err))
+
     engine = create_async_engine(
         db_url,                  # Fixed dynamic async URL use kar rahe hain
         pool_pre_ping=True,      # Connection check karne ke liye ping bhejna
@@ -149,6 +167,46 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
             await session.close() # Session band ho jayegi taaki leak na ho
 
 
+async def _raw_asyncpg_diagnostic():
+    """
+    SQLAlchemy ko poori tarah bypass karke, seedha asyncpg.connect() se ek
+    diagnostic connection try karta hai — sirf logging ke liye. Isse pata
+    chalega ki asli fail SQLAlchemy ke URL/dialect layer me ho raha hai ya
+    asyncpg driver me hi.
+    """
+    try:
+        import asyncpg
+    except Exception as import_err:
+        logger.warning("Raw asyncpg diagnostic — asyncpg import hi fail ho gaya", error=str(import_err))
+        return
+
+    try:
+        from sqlalchemy.engine.url import make_url
+        u = make_url(db_url)
+        logger.warning(
+            "Raw asyncpg diagnostic — connect try kar rahe hain",
+            host_repr=repr(u.host),
+            port=u.port,
+        )
+        conn = await asyncpg.connect(
+            host=u.host,
+            port=u.port,
+            user=u.username,
+            password=u.password,
+            database=u.database,
+            timeout=10,
+        )
+        await conn.close()
+        logger.warning("Raw asyncpg diagnostic — CONNECT SUCCESS (bina SQLAlchemy ke)")
+    except Exception as raw_err:
+        logger.warning(
+            "Raw asyncpg diagnostic — CONNECT FAILED (bina SQLAlchemy ke)",
+            error=str(raw_err),
+            error_type=type(raw_err).__name__,
+            error_repr=repr(raw_err),
+        )
+
+
 async def init_db_schema(max_retries: int = 5, base_delay_seconds: float = 2.0):
     """
     Startup par (FastAPI lifespan ke andar) call hota hai. Koi Alembic migration
@@ -165,6 +223,8 @@ async def init_db_schema(max_retries: int = 5, base_delay_seconds: float = 2.0):
     hiccups se schema-creation permanently fail na ho.
     """
     from src.database.models import Base
+
+    await _raw_asyncpg_diagnostic()
 
     last_error: Exception | None = None
     for attempt in range(1, max_retries + 1):
