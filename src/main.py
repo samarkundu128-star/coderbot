@@ -35,8 +35,10 @@ from src.telegram.admin_commands import (
     restart_command_handler,
     addlink_command_handler,
     list_links_command_handler,
+    sync_website_command_handler,
 )
 from src.telegram.scraper_commands import getlinks_command_handler
+from src.services.website_sync_service import sync_website_links
 from src.telegram.middleware import run_global_middleware, subscription_recheck_callback
 from src.services.render_service import trigger_manual_deploy
 from src.services.keepalive_service import self_ping
@@ -129,12 +131,26 @@ async def lifespan(app: FastAPI):
         telegram_app.add_handler(CommandHandler("addlink", addlink_command_handler))
         telegram_app.add_handler(CommandHandler("links", list_links_command_handler))
         telegram_app.add_handler(CommandHandler("getlinks", getlinks_command_handler))
+        telegram_app.add_handler(CommandHandler("syncwebsite", sync_website_command_handler))
         telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, core_message_handler))
 
         await telegram_app.initialize()
 
         # Missing tables (jaise LinkAsset) ko auto-create karta hai — no Alembic in this project
         await init_db_schema()
+
+        # Startup par agar WEBSITE_URL set hai to background me automatically
+        # scan karke uske saare download links database me store kar dega.
+        # Non-blocking hai — bot startup me isse koi delay nahi hoga.
+        if settings.WEBSITE_URL:
+            async def _startup_website_sync():
+                try:
+                    added = await sync_website_links(settings.WEBSITE_URL, added_by=settings.ADMIN_TELEGRAM_ID)
+                    logger.info("Startup website sync complete", new_links_added=added)
+                except Exception as e:
+                    logger.warning("Startup website sync failed (bot chalta rahega)", error=str(e))
+
+            telegram_app.create_task(_startup_website_sync())
 
         # WEBHOOK_URL bhi clean kar lein (trailing space/slash jaisi mobile-copy-paste dikkatein)
         webhook_base = settings.WEBHOOK_URL.strip().rstrip("/")
