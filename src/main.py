@@ -2,6 +2,11 @@
 import os
 import sys
 try:
+    from src.utils.code_doctor import run_full_diagnostics
+    run_full_diagnostics()
+except Exception as e:
+    print(f"⚠️ Code Doctor diagnostics chala nahi paya (Ya file missing hai): {e}")
+try:
     from src.utils.auto_healer import setup_auto_healer, register_async_exception_handler
     setup_auto_healer()
     print("✅ AI Auto-Healer successfully initialize ho gaya hai!")
