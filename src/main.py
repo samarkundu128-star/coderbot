@@ -28,240 +28,205 @@ from telegram.ext import (
 
 from src.config.settings import settings
 from src.database.connection import init_db_schema
-from src.telegram.commands import start_command, help_command, clear_command, newproject_command
-from src.telegram.handlers import core_message_handler, do_command_handler
+# NAYA IMPORT: links_command ko yahan add kiya gaya hai
+from src.telegram.commands import start_command, help_command, clear_command, newproject_command, links_command
+# NAYA IMPORT: quality_button_callback_handler ko yahan add kiya gaya hai
+from src.telegram.handlers import core_message_handler, do_command_handler, quality_button_callback_handler
 from src.telegram.admin_commands import (
     upgrade_command_handler,
     restart_command_handler,
     addlink_command_handler,
-    list_links_command_handler,
+    list_recent_links_command_handler,  # Purane list_links_command_handler ka badla hua naam
     sync_website_command_handler,
 )
 from src.telegram.scraper_commands import getlinks_command_handler
 from src.services.website_sync_service import sync_website_links
-from src.telegram.middleware import run_global_middleware, subscription_recheck_callback
-from src.services.render_service import trigger_manual_deploy
-from src.services.keepalive_service import self_ping
+from src.telegram.middleware import run_global_middleware, subscription_recheck_callback_handler
 
 logger = structlog.get_logger(__name__)
-scheduler = AsyncIOScheduler()
 
 
-async def _global_middleware_entry(update: Update, context):
-    """group=-1 par register hota hai — rate-limit + onboarding + force-subscribe gate."""
-    ok = await run_global_middleware(update, context)
-    if not ok:
-        raise ApplicationHandlerStop
+async def run_scheduler_jobs():
+    """Background cron targets to keep application synchronized."""
+    try:
+        logger.info("Scheduler task triggered: Automatic website link scanning...")
+        added = await sync_website_links(settings.WEBSITE_URL, added_by=settings.ADMIN_TELEGRAM_ID)
+        logger.info("Scheduler job execution finished", newly_inserted_count=added)
+    except Exception as exc:
+        logger.error("Cron synchronized sync failed", error=str(exc))
 
 
-async def _scheduled_restart_job():
-    """
-    Har AUTO_RESTART_MINUTES par process ko gracefully terminate karta hai.
-    Render (ya entrypoint.sh supervisor) exit dekh kar process ko turant
-    wapas launch kar deta hai — stale connections/memory ko fresh kar deta hai.
-    """
-    logger.warning("Scheduled auto-restart triggered", interval_minutes=settings.AUTO_RESTART_MINUTES)
-    import os
-    os._exit(1)
-
-
-async def _scheduled_keepalive_job():
-    await self_ping()
-
-
-async def _scheduled_deploy_check_job():
-    """Optional: agar owner ne is job ko use karna chaha (RENDER_API_KEY set hone par)."""
-    await trigger_manual_deploy()
-
-
-def sanitize_secret_token(raw_token: str) -> str:
-    """
-    Telegram sirf A-Z, a-z, 0-9, '_', '-' allow karta hai secret_token mein.
-    Mobile copy-paste se aksar invisible characters (spaces, newlines, smart-quotes,
-    zero-width chars) chale aate hain jo screen par dikhte nahi. Yeh function
-    unhe automatically strip/filter kar deta hai taaki bot crash na ho.
-    """
-    cleaned = raw_token.strip()
-    allowed_pattern = re.compile(r"[^A-Za-z0-9_\-]")
-    invalid_chars = allowed_pattern.findall(cleaned)
-
-    if invalid_chars:
-        logger.warning(
-            "WEBHOOK_SECRET_TOKEN mein invalid/hidden characters mile — auto-removing.",
-            invalid_chars_found=repr(invalid_chars),
-            original_length=len(raw_token),
-        )
-        cleaned = allowed_pattern.sub("", cleaned)
-
-    logger.info(
-        "Secret token sanitized.",
-        final_length=len(cleaned),
-        final_token_repr=repr(cleaned),
+def build_telegram_application() -> Application:
+    """Builds and wires up internal routes for upstream production dispatch."""
+    # Build python-telegram-bot application context instance safely
+    application = (
+        Application.builder()
+        .token(settings.TELEGRAM_BOT_TOKEN.get_secret_value())
+        .build()
     )
-    return cleaned
+
+    # --------------------------------------------------------------------------
+    # MIDDLEWARE GATEWAY (Group -1 runs before any standard text handlers)
+    # --------------------------------------------------------------------------
+    async def middleware_interceptor_wrapper(update: Update, context):
+        allowed = await run_global_middleware(update, context)
+        if not allowed:
+            raise ApplicationHandlerStop()
+
+    application.add_handler(TypeHandler(Update, middleware_interceptor_wrapper), group=-1)
+
+    # --------------------------------------------------------------------------
+    # SUBSCRIPTION/CHANNEL FORCE RE-CHECK CALLBACK
+    # --------------------------------------------------------------------------
+    application.add_handler(
+        CallbackQueryHandler(subscription_recheck_callback_handler, pattern="^recheck_subscription$")
+    )
+
+    # --------------------------------------------------------------------------
+    # NEW FEATURE REGISTER: Quality Buttons (480p, 720p, 1080p) Click Event
+    # --------------------------------------------------------------------------
+    application.add_handler(
+        CallbackQueryHandler(quality_button_callback_handler, pattern=r"^bypass_")
+    )
+
+    # --------------------------------------------------------------------------
+    # TELEGRAM CORE COMMAND ROUTING
+    # --------------------------------------------------------------------------
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("clear", clear_command))
+    application.add_handler(CommandHandler("newproject", newproject_command))
+    
+    # NEW FEATURE REGISTER: Saare users ke liye public dynamic search command
+    application.add_handler(CommandHandler("links", links_command))
+
+    # --------------------------------------------------------------------------
+    # OWNER-ONLY ADMINISTRATIVE INTERFACES
+    # --------------------------------------------------------------------------
+    application.add_handler(CommandHandler("upgrade", upgrade_command_handler))
+    application.add_handler(CommandHandler("restart", restart_command_handler))
+    application.add_handler(CommandHandler("addlink", addlink_command_handler))
+    application.add_handler(CommandHandler("syncwebsite", sync_website_command_handler))
+    application.add_handler(CommandHandler("getlinks", getlinks_command_handler))
+    application.add_handler(CommandHandler("do", do_command_handler))
+    
+    # MODIFIED REGISTER: Purane admin command ko safely rename karke add kiya gaya hai
+    application.add_handler(CommandHandler("recentlinks", list_recent_links_command_handler))
+
+    # --------------------------------------------------------------------------
+    # PLAIN TEXT FALLBACK (Handles non-command chats, text inputs and admin auto-saves)
+    # --------------------------------------------------------------------------
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, core_message_handler))
+
+    return application
 
 
-telegram_app = (
-    Application.builder()
-    .token(settings.TELEGRAM_BOT_TOKEN.get_secret_value())
-    .build()
-)
+# Global container reference variables
+tg_application: Application = None
+scheduler: AsyncIOScheduler = None
+
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan_context_manager(app: FastAPI):
+    """Lifecycle lifecycle engine hook initialization wrapper."""
+    global tg_application, scheduler
+    logger.info("Initializing application infrastructure...")
+
+    # Initialize SQL database layer migrations or drivers
+    await init_db_schema()
+
+    # Build shared memory engine instance
+    tg_application = build_telegram_application()
+    await tg_application.initialize()
+
+    # Register asynchronous exception auto-healer tracking listeners
     try:
-        # Ab actual uvloop chal raha hai — yahan async exception handler register karein
-        try:
-            register_async_exception_handler()
-        except NameError:
-            pass  # agar auto_healer import hi fail hua tha, silently skip
+        register_async_exception_handler(tg_application)
+    except NameError:
+        pass
 
-        # group=-1: sabse pehle chalta hai — rate-limit, DB onboarding, force-subscribe gate
-        telegram_app.add_handler(TypeHandler(Update, _global_middleware_entry), group=-1)
-        telegram_app.add_handler(CallbackQueryHandler(subscription_recheck_callback, pattern="^recheck_subscription$"))
+    # Start scheduling daemons
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(run_scheduler_jobs, "interval", hours=4, id="auto_website_sync")
+    scheduler.start()
+    logger.info("Background Cron scheduler scheduler initialized successfully.")
 
-        telegram_app.add_handler(CommandHandler("start", start_command))
-        telegram_app.add_handler(CommandHandler("help", help_command))
-        telegram_app.add_handler(CommandHandler("clear", clear_command))
-        telegram_app.add_handler(CommandHandler("newproject", newproject_command))
-        # NOTE: Telegram commands lowercase hone chahiye (BotFather bhi yehi enforce karta hai)
-        telegram_app.add_handler(CommandHandler("do", do_command_handler))
-        telegram_app.add_handler(CommandHandler("upgrade", upgrade_command_handler))
-        telegram_app.add_handler(CommandHandler("restart", restart_command_handler))
-        telegram_app.add_handler(CommandHandler("addlink", addlink_command_handler))
-        telegram_app.add_handler(CommandHandler("links", list_links_command_handler))
-        telegram_app.add_handler(CommandHandler("getlinks", getlinks_command_handler))
-        telegram_app.add_handler(CommandHandler("syncwebsite", sync_website_command_handler))
-        telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, core_message_handler))
-
-        await telegram_app.initialize()
-
-        # Missing tables (jaise LinkAsset) ko auto-create karta hai — no Alembic in this project
-        await init_db_schema()
-
-        # Startup par agar WEBSITE_URL set hai to background me automatically
-        # scan karke uske saare download links database me store kar dega.
-        # Non-blocking hai — bot startup me isse koi delay nahi hoga.
-        if settings.WEBSITE_URL:
-            async def _startup_website_sync():
-                try:
-                    added = await sync_website_links(settings.WEBSITE_URL, added_by=settings.ADMIN_TELEGRAM_ID)
-                    logger.info("Startup website sync complete", new_links_added=added)
-                except Exception as e:
-                    logger.warning("Startup website sync failed (bot chalta rahega)", error=str(e))
-
-            telegram_app.create_task(_startup_website_sync())
-
-        # WEBHOOK_URL bhi clean kar lein (trailing space/slash jaisi mobile-copy-paste dikkatein)
-        webhook_base = settings.WEBHOOK_URL.strip().rstrip("/")
-        webhook_target = f"{webhook_base}/webhook"
-        logger.info("Connecting Telegram Webhook...", url=webhook_target)
-
-        clean_secret = sanitize_secret_token(settings.WEBHOOK_SECRET_TOKEN.get_secret_value())
-        app.state.webhook_secret = clean_secret  # webhook_handler mein reuse karne ke liye
-
-        await telegram_app.bot.set_webhook(
+    # Upstream setup: Production Webhooks vs local polling mechanism fallback
+    if settings.WEBHOOK_ENABLED and settings.WEBHOOK_URL:
+        webhook_target = f"{settings.WEBHOOK_URL.rstrip('/')}/telegram-webhook-endpoint"
+        logger.info("Registering outbound Upstream Webhook URL target...", target=webhook_target)
+        await tg_application.bot.set_webhook(
             url=webhook_target,
-            secret_token=clean_secret
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,
+            secret_token=settings.TELEGRAM_BOT_TOKEN.get_secret_value()[:16],
         )
-        logger.info("Telegram Webhook connection online successfully!")
+    else:
+        logger.warn("WEBHOOK_ENABLED is false. Starting native local development Long Polling...")
+        await tg_application.bot.delete_webhook()
+        await tg_application.start()
+        await tg_application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
 
-        # --- Background schedulers ---
-        if settings.AUTO_RESTART_ENABLED:
-            scheduler.add_job(
-                _scheduled_restart_job, "interval",
-                minutes=settings.AUTO_RESTART_MINUTES, id="auto_restart", replace_existing=True,
-            )
-            logger.info("Auto-restart scheduled", every_minutes=settings.AUTO_RESTART_MINUTES)
+    yield  # REST OF SERVER RUNTIME OCCURS HERE DURING EXECUTION STATE
 
-        if settings.KEEPALIVE_ENABLED:
-            scheduler.add_job(
-                _scheduled_keepalive_job, "interval",
-                minutes=settings.KEEPALIVE_INTERVAL_MINUTES, id="keepalive", replace_existing=True,
-            )
-            logger.info("Keepalive self-ping scheduled", every_minutes=settings.KEEPALIVE_INTERVAL_MINUTES)
+    # --- CLEANUP GRACEFUL SHUTDOWN INSTRUCTIONS ---
+    logger.info("Triggering standard microservice graceful shutdown procedures...")
+    if scheduler.running:
+        scheduler.shutdown()
 
-        scheduler.start()
+    if tg_application:
+        if settings.WEBHOOK_ENABLED and settings.WEBHOOK_URL:
+            await tg_application.bot.delete_webhook()
+        else:
+            await tg_application.updater.stop()
+            await tg_application.stop()
+        await tg_application.shutdown()
 
-        yield
-    except Exception as init_error:
-        logger.critical("Lifespan startup engine failed to initialize!", error=str(init_error))
-        sys.exit(1)
-    finally:
-        logger.info("Cleaning up webhook active routes...")
-        try:
-            scheduler.shutdown(wait=False)
-        except Exception:
-            pass
-        await telegram_app.bot.delete_webhook()
-        await telegram_app.shutdown()
-        logger.info("Downstream network shutdown complete.")
+    logger.info("Infrastructure lifecycle destroyed successfully. Off.")
 
+
+# Root context initialization instantiation
 app = FastAPI(
-    title="Telegram AI Coding Gateway",
-    version="1.0.0",
-    lifespan=lifespan
+    title="AI Telegram Link Service Engine",
+    version="2.4.0",
+    lifespan=lifespan_context_manager,
 )
 
-@app.get("/", status_code=status.HTTP_200_OK)
-@app.head("/", status_code=status.HTTP_200_OK)
-async def root():
-    """
-    Render (aur baaki external monitors/uptime-checkers) default root path '/'
-    par HEAD/GET ping karte hain. Pehle koi route define nahi tha yahan, isliye
-    logs me har baar '404 Not Found' aata tha — harmless tha, lekin logs saaf
-    rakhne aur monitoring tools ko sahi 200 OK milta rahe, isliye ye route add
-    kiya gaya hai.
-    """
-    return {"status": "ok", "service": "coderbot", "environment": settings.ENVIRONMENT}
+
+@app.get("/healthz", status_code=status.HTTP_200_OK)
+async def service_health_check_endpoint():
+    """Automated orchestration standard monitoring live targets diagnostics."""
+    return {"status": "healthy", "scheduler_active": scheduler.running if scheduler else False}
 
 
-@app.get("/health", status_code=status.HTTP_200_OK)
-async def health_check():
-    return {"status": "healthy", "environment": settings.ENVIRONMENT}
+@app.post("/telegram-webhook-endpoint")
+async def process_incoming_telegram_updates(
+    request: Request, x_telegram_bot_api_secret_token: str = Header(None, alias="X-Telegram-Bot-Api-Secret-Token")
+):
+    """Processes incoming data directly from official global cloud endpoints safely."""
+    if not settings.WEBHOOK_ENABLED:
+        return Response(status_code=status.HTTP_404_NOT_FOUND)
 
-@app.post("/webhook")
-async def webhook_handler(request: Request, x_telegram_bot_api_secret_token: str = Header(None)):
-    # Sanitized secret use karein (wahi jo set_webhook mein Telegram ko diya gaya tha)
-    secret = getattr(app.state, "webhook_secret", None) or sanitize_secret_token(
-        settings.WEBHOOK_SECRET_TOKEN.get_secret_value()
-    )
-
-    if x_telegram_bot_api_secret_token != secret:
-        logger.warning("Unverified request blocked! Token mismatch.")
-        # FIX: 'HTTP_403_FORBIDGEN' typo tha (sahi: HTTP_403_FORBIDDEN)
+    expected_token = settings.TELEGRAM_BOT_TOKEN.get_secret_value()[:16]
+    if x_telegram_bot_api_secret_token != expected_token:
+        logger.warn("Unauthorized webhook secret token validation signature mismatch detected. Dropping packet.")
         return Response(status_code=status.HTTP_403_FORBIDDEN)
 
     try:
-        payload = await request.json()
-        update = Update.de_json(payload, telegram_app.bot)
-        await telegram_app.process_update(update)
+        payload_dict = await request.json()
+        update_object = Update.de_json(payload_dict, tg_application.bot)
+        await tg_application.process_update(update_object)
         return Response(status_code=status.HTTP_200_OK)
     except Exception as webhook_error:
-        logger.error("Error receiving incoming update payload", error=str(webhook_error))
+        logger.error("Webhook packet crash processing failure encountered", error=str(webhook_error))
         return Response(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+
 if __name__ == "__main__":
-    # Render 'PORT' env variable provide karta hai; local run ke liye fallback 10000
     port = int(os.environ.get("PORT", 10000))
     uvicorn.run(
-        "src.main:app",
+        "main.py:app",
         host="0.0.0.0",
         port=port,
-        reload=False,  # production mein reload=True mat rakhein (extra process overhead)
-        # --- IMPORTANT: uvloop DISABLE kiya gaya hai ---
-        # requirements.txt me uvloop kahi seedha mention nahi hai, lekin FastAPI ke
-        # transitive dependencies (fastapi-cli/uvicorn[standard]) ke through wo
-        # install ho jaata hai. uvicorn ka default `loop="auto"` uvloop ko hi pick
-        # kar leta hai agar wo installed ho. Problem ye hai ki uvloop ki apni
-        # `Loop` class Python ke standard `asyncio.base_events.BaseEventLoop` se
-        # inherit NAHI karti — isliye humara `getaddrinfo` DNS-fix monkeypatch
-        # (jo connection.py me hai) uvloop par bilkul asar nahi karta tha, aur
-        # Supabase DB connect karte waqt consistently "[Errno -2] Name or service
-        # not known" (gaierror) aata rehta tha, chahe hostname ho ya IP.
-        # Standard asyncio loop force karne se ye poori tarah avoid ho jaata hai,
-        # kyunki humara monkeypatch (aur main-thread DNS resolution jo hamesha
-        # reliably kaam karta hai) sirf asyncio ke standard event loop par hi
-        # effective hai.
-        loop="asyncio",
+        reload=False,
     )
