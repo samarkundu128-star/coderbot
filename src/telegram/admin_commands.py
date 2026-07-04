@@ -8,6 +8,7 @@ from telegram.ext import ContextTypes
 from src.config.settings import settings
 from src.database.connection import AsyncSessionLocal
 from src.database.repository import LinkRepository
+from src.services.website_sync_service import sync_website_links
 
 logger = structlog.get_logger(__name__)
 
@@ -243,6 +244,50 @@ async def addlink_command_handler(update: Update, context: ContextTypes.DEFAULT_
         await session.commit()
 
     await update.message.reply_text(f"🔗 Link save ho gaya: *{name}*", parse_mode="Markdown")
+
+
+async def sync_website_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Admin-only: /syncwebsite <optional website_url>
+
+    - /syncwebsite                      → settings.WEBSITE_URL (env var) scan karta hai
+    - /syncwebsite https://example.com  → koi bhi diya gaya website scan karta hai
+
+    Jo bhi website do, uske saare <a> tag download links dhoond ke database me
+    store kar deta hai (naam anchor text se milta hai). Jitni baar chaho, jitni
+    alag websites chaho, sab isi ek command se chal jayenga.
+    """
+    if not _is_admin(update):
+        await update.message.reply_text("⛔ Yeh command sirf bot owner use kar sakta hai.")
+        return
+
+    target_url = context.args[0].strip() if context.args else settings.WEBSITE_URL
+
+    if not target_url:
+        await update.message.reply_text(
+            "⚠️ Koi website URL nahi mila.\n\n"
+            "Usage: `/syncwebsite <website_url>`\n"
+            "Example: `/syncwebsite https://example.com`\n\n"
+            "Ya `WEBSITE_URL` environment variable set kar do — tab bina URL diye "
+            "bhi `/syncwebsite` chal jayega.",
+            parse_mode="Markdown",
+        )
+        return
+
+    status_msg = await update.message.reply_text(f"🌐 `{target_url}` scan kar raha hoon...", parse_mode="Markdown")
+
+    try:
+        added_count = await sync_website_links(target_url, added_by=update.effective_user.id)
+        if added_count == 0:
+            await status_msg.edit_text("✅ Scan complete — koi naya link nahi mila (sab pehle se save hain, ya is page pe links nahi the).")
+        else:
+            await status_msg.edit_text(
+                f"✅ Scan complete — *{added_count} naye link(s)* database me save ho gaye!\n\n"
+                "Ab koi bhi user unka naam type karega toh link mil jayega.",
+                parse_mode="Markdown",
+            )
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Website scan fail ho gaya: {str(e)}")
 
 
 async def list_links_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
