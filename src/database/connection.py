@@ -1,4 +1,5 @@
 import sys
+import asyncio
 import socket
 from urllib.parse import urlsplit
 from typing import AsyncGenerator
@@ -100,16 +101,49 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
             await session.close() # Session band ho jayegi taaki leak na ho
 
 
-async def init_db_schema():
+async def init_db_schema(max_retries: int = 5, base_delay_seconds: float = 2.0):
     """
     Startup par (FastAPI lifespan ke andar) call hota hai. Koi Alembic migration
     system nahi hai is project me, isliye missing tables (jaise naya LinkAsset)
     ko safely auto-create kar deta hai. Existing tables ko touch nahi karta.
+
+    --- RETRY-WITH-BACKOFF ---
+    Render par container cold-boot hone ke turant baad kabhi-kabhi outbound DNS
+    resolver 1-2 second ke liye fully ready nahi hota, isliye pehla hi DB connect
+    attempt "[Errno -2] Name or service not known" jaisi transient error de sakta
+    hai — jabki hostname khud sahi/valid hota hai (thodi der baad resolve ho jaata
+    hai). Isliye ek hi attempt par give up karne ke bajaye, chhoti exponential
+    backoff ke saath dobara try karte hain, taaki genuine transient startup
+    hiccups se schema-creation permanently fail na ho.
     """
     from src.database.models import Base
-    try:
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        logger.info("Database schema verified/created successfully.")
-    except Exception as e:
-        logger.error("Database schema auto-create failed!", error=str(e))
+
+    last_error: Exception | None = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            logger.info(
+                "Database schema verified/created successfully.",
+                attempt=attempt,
+            )
+            return
+        except Exception as e:
+            last_error = e
+            if attempt == max_retries:
+                break
+            delay = base_delay_seconds * (2 ** (attempt - 1))  # 2s, 4s, 8s, 16s...
+            logger.warning(
+                "Database schema auto-create attempt failed — retrying.",
+                attempt=attempt,
+                max_retries=max_retries,
+                retry_in_seconds=delay,
+                error=str(e),
+            )
+            await asyncio.sleep(delay)
+
+    logger.error(
+        "Database schema auto-create failed after all retries!",
+        attempts=max_retries,
+        error=str(last_error),
+    )
