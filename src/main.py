@@ -151,7 +151,7 @@ async def lifespan_context_manager(app: FastAPI):
             url=webhook_target,
             allowed_updates=Update.ALL_TYPES,
             drop_pending_updates=True,
-            secret_token=settings.TELEGRAM_BOT_TOKEN.get_secret_value()[:16],
+            secret_token=settings.WEBHOOK_SECRET_TOKEN.get_secret_value(),
         )
     else:
         logger.warn("WEBHOOK_ENABLED is false. Starting native local development Long Polling...")
@@ -195,7 +195,7 @@ async def process_incoming_telegram_updates(
     if not settings.WEBHOOK_ENABLED:
         return Response(status_code=status.HTTP_404_NOT_FOUND)
 
-    expected_token = settings.TELEGRAM_BOT_TOKEN.get_secret_value()[:16]
+    expected_token = settings.WEBHOOK_SECRET_TOKEN.get_secret_value()
     if x_telegram_bot_api_secret_token != expected_token:
         logger.warn("Unauthorized webhook secret token validation signature mismatch detected. Dropping packet.")
         return Response(status_code=status.HTTP_403_FORBIDDEN)
