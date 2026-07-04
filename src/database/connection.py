@@ -26,6 +26,29 @@ else:
     db_url = raw_url
 # ---------------------------------------------
 
+# --- GETADDRINFO THREAD-POOL BYPASS ---
+# Deployment logs se ye confirm hua ki hostname/IP DNS resolution jab MAIN
+# THREAD se synchronously ki jaati hai, wo HAMESHA successfully hoti hai — lekin
+# jab wahi resolution asyncio ke default background thread-pool executor se
+# (jise asyncpg/asyncio internally `loop.getaddrinfo()` ke through use karte
+# hain) hoti hai, wo CONSISTENTLY fail hoti hai — chahe hostname ho ya seedha
+# numeric IP. Isse pata chalta hai ki asli problem DNS content ka nahi, balki
+# is Render container me background-thread-pool se getaddrinfo() call karne
+# ka mechanism hi broken hai (jaisa gVisor-jaise sandboxed environments me
+# kabhi-kabhi dekha jata hai).
+#
+# Fix: event loop ka `getaddrinfo` seedha main thread par (synchronously, executor
+# thread-pool ko bypass karke) call karne ke liye monkeypatch kar dete hain. Isse
+# har getaddrinfo() call reliable, already-proven-working code path use karega.
+import asyncio as _asyncio_patch
+
+async def _main_thread_getaddrinfo(self, host, port, *, family=0, type=0, proto=0, flags=0):
+    return socket.getaddrinfo(host, port, family, type, proto, flags)
+
+_asyncio_patch.base_events.BaseEventLoop.getaddrinfo = _main_thread_getaddrinfo
+logger.warning("getaddrinfo() ko background thread-pool se bypass karke main-thread par force kar diya gaya (Render DNS workaround).")
+# ---------------------------------------------
+
 # --- DEEP DEBUG + IP PRE-RESOLUTION ---
 # Render jaise sandboxed containers me ek strange-lekin-known behavior dekha gaya:
 # hostname jab MAIN THREAD se synchronously resolve kiya jata hai (jaise yahan
@@ -164,6 +187,9 @@ async def init_db_schema(max_retries: int = 5, base_delay_seconds: float = 2.0):
                 max_retries=max_retries,
                 retry_in_seconds=delay,
                 error=str(e),
+                error_type=type(e).__name__,
+                error_repr=repr(e),
+                error_cause=repr(e.__cause__) if e.__cause__ else None,
             )
             await asyncio.sleep(delay)
 
@@ -171,4 +197,7 @@ async def init_db_schema(max_retries: int = 5, base_delay_seconds: float = 2.0):
         "Database schema auto-create failed after all retries!",
         attempts=max_retries,
         error=str(last_error),
+        error_type=type(last_error).__name__ if last_error else None,
+        error_repr=repr(last_error),
+        error_cause=repr(last_error.__cause__) if last_error and last_error.__cause__ else None,
     )
