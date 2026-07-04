@@ -58,6 +58,23 @@ class Settings(BaseSettings):
     def fix_postgres_protocol(cls, v: str) -> str:
         if not v:
             return v
+
+        # --- Mobile copy-paste se aksar invisible characters (spaces, newlines,
+        # smart-quotes, zero-width chars) chale aate hain jo screen par dikhte nahi,
+        # lekin hostname ke andar chip kar DNS resolution fail kara dete hain
+        # ("Name or service not known" wala error). Pehle unhe strip/clean kar dete hain.
+        original = v
+        v = v.strip()
+        # Sirf printable, non-whitespace ASCII allow karte hain URL ke andar
+        v = "".join(ch for ch in v if ch.isprintable() and not ch.isspace())
+        if v != original:
+            import structlog
+            structlog.get_logger(__name__).warning(
+                "DATABASE_URL mein invalid/hidden characters mile — auto-cleaned.",
+                original_length=len(original),
+                cleaned_length=len(v),
+            )
+
         # Agar URL postgres:// ya postgresql:// se shuru ho raha hai, toh use asyncpg par force karein
         if v.startswith("postgres://"):
             v = v.replace("postgres://", "postgresql+asyncpg://", 1)
