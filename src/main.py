@@ -130,7 +130,7 @@ async def lifespan_context_manager(app: FastAPI):
     await tg_application.initialize()
 
     try:
-        register_async_exception_handler(tg_application)
+        register_async_exception_handler()
     except NameError:
         pass
 
