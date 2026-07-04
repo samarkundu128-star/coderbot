@@ -74,14 +74,14 @@ async def _handle_owner_code_task(update: Update, context: ContextTypes.DEFAULT_
 
         await status_msg.edit_text(f"📝 **File Generation:** `{filename}`\n\n`{explanation}`\n\nPushing to GitHub...")
         
-        commit_sha = await push_files(
-            repo_name=settings.GITHUB_REPO,
-            file_changes=[{"path": filename, "content": code}],
-            commit_message=f"Auto-coded: {filename}"
+        commit_sha = await asyncio.to_thread(
+            push_files,
+            [{"file_path": filename, "content": code}],
+            f"Auto-coded: {filename}"
         )
         
         await status_msg.edit_text(f"🚀 **Pushed to GitHub!**\nCommit: `{commit_sha[:7]}`\n\nStarting Render Deployment tracker...")
-        asyncio.create_task(watch_deploy_and_notify(update, context))
+        asyncio.create_task(watch_deploy_and_notify(context.bot, update.effective_chat.id, commit_sha))
     except Exception as e:
         logger.error("owner_code_task_failed", error=str(e))
         await status_msg.edit_text(f"❌ **Code Task Error:** {str(e)}")
