@@ -22,8 +22,12 @@ class AICodingEngine:
                 raise ValueError("GROQ_API_KEY missing hai settings aur environment dono me!")
 
             self.client = Groq(api_key=api_key)
-            # Production coding ke liye Llama 3 70B standard aur powerful model hai
-            self.model = "llama3-70b-8192"
+            # NOTE: llama3-70b-8192, llama-3.1-8b-instant, aur llama-3.3-70b-versatile
+            # sab Groq dwara decommission/deprecate ho chuke hain (last checked: July 2026).
+            # openai/gpt-oss-120b abhi ka current, sabse powerful, production-ready model hai —
+            # isi wajah se pehle /do command har baar fail ho raha tha ("AI koi file generate
+            # nahi kar paya") kyunki purana model hi exist nahi karta ab.
+            self.model = "openai/gpt-oss-120b"
             print("✅ Groq AI Coding Engine successfully initialize ho gaya!")
         except Exception as e:
             logger.critical("Groq SDK configuration failed!", error=str(e))
@@ -75,14 +79,22 @@ class AICodingEngine:
             raise AIServiceException(f"Model generation error: {str(e)}")
 
     def _parse_response(self, text: str) -> Dict[str, Any]:
+        # Kabhi-kabhi model instructions ignore karke ```json fences laga deta hai —
+        # unhe pehle hi hata dete hain taaki JSON parsing fail na ho.
+        cleaned = text.strip()
+        if cleaned.startswith("```"):
+            lines = cleaned.split("\n")
+            cleaned = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+
         try:
-            start_idx = text.find("[")
-            end_idx = text.rfind("]") + 1
-            if start_idx != -1 and end_idx != -1:
-                json_str = text[start_idx:end_idx]
+            start_idx = cleaned.find("[")
+            end_idx = cleaned.rfind("]") + 1
+            if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                json_str = cleaned[start_idx:end_idx]
                 files = json.loads(json_str)
-                commentary = text[:start_idx] + text[end_idx:]
+                commentary = cleaned[:start_idx] + cleaned[end_idx:]
                 return {"files": files, "commentary": commentary.strip()}
-        except Exception:
-            pass
+        except Exception as parse_err:
+            logger.warning("AI response JSON parse fail ho gaya, raw text return kar rahe hain", error=str(parse_err))
+
         return {"files": [], "commentary": text}
