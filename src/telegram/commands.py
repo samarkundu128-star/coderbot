@@ -119,13 +119,13 @@ async def clear_command(update: Update, context: CallbackContext) -> None:
         chat_repo = ChatRepository(session)
         await chat_repo.clear_history(chat_id)
         await session.commit()
-    await update.effective_chat.send_message(text=\"🧹 **Success:** Aapki purani conversation history session delete ho gayi hai.\")
+    await update.effective_chat.send_message(text="🧹 **Success:** Aapki purani conversation history session delete ho gayi hai.")
 
 
 async def newproject_command(update: Update, context: CallbackContext) -> None:
     """Naya folder/project tracking context shuru karne ke liye."""
     if not context.args:
-        await update.effective_chat.send_message(text=\"❌ **Usage:** `/newproject <project_name>`\")
+        await update.effective_chat.send_message(text="❌ **Usage:** `/newproject <project_name>`")
         return
 
     project_name = " ".join(context.args)
