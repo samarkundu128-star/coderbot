@@ -28,20 +28,24 @@ _ai_engine = AICodingEngine()
 URL_REGEX = re.compile(r"https?://[^\s]+")
 BRUTE_FORCE_URL_REGEX = re.compile(r"https?://[^\s'\"\\><\}\{\[\]\)\(,\n\r\t]+")
 
-# ⚠️ APNI DEFAULT WEBSITE KA URL YAHA SET KAREIN
 DEFAULT_TARGET_WEBSITE = "https://gplinks.com" 
 
-SYSTEM_PROMPT = """You are an elite coding assistant. When given a task, respond ONLY with a valid JSON object — no markdown fences, no extra commentary, nothing outside the JSON.
-The JSON must have exactly these keys:
-{
-  "language": "programming language name, e.g. python",
-  "filename": "suggested filename, e.g. calculator.py",
-  "code": "the complete, runnable code as a single string with \n for newlines",
-  "explanation": "a short 1-3 sentence explanation of how the code works"
+# Highly realistic browser fingerprint headers to bypass Cloudflare/WAF blockades
+STABLE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Cache-Control": "max-age=0",
+    "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1"
 }
-Rules:
-- Code must be complete and runnable, not a snippet.
-"""
 
 
 def _is_admin(update: Update) -> bool:
@@ -58,26 +62,25 @@ async def _store_link_from_message(update: Update, url: str, remainder: str):
 
 
 # ---------------------------------------------------------------------------
-# Brute-Force Raw Text Tokenizer
+# Brute-Force Link Extractor (With Heavy Security Headers)
 # ---------------------------------------------------------------------------
 async def _recursive_link_extractor(client: httpx.AsyncClient, current_url: str, depth: int = 0, visited_urls: set = None) -> list:
     if visited_urls is None:
         visited_urls = set()
         
-    if depth > 12 or current_url in visited_urls:
+    if depth > 10 or current_url in visited_urls:
         return []
         
     visited_urls.add(current_url)
     links_found = []
     
     try:
-        await asyncio.sleep(0.4)
-        resp = await client.get(current_url, timeout=15.0)
+        await asyncio.sleep(0.5)
+        resp = await client.get(current_url, timeout=20.0)
         if resp.status_code != 200:
             return []
             
         page_content = resp.text
-        
         all_raw_strings = BRUTE_FORCE_URL_REGEX.findall(page_content)
         for raw_url in all_raw_strings:
             rurl_lower = raw_url.lower()
@@ -99,36 +102,27 @@ async def _recursive_link_extractor(client: httpx.AsyncClient, current_url: str,
                     links_found.extend(sub_links)
                     
     except Exception as e:
-        logger.debug("extractor_depth_exception", url=current_url, error=str(e))
+        logger.debug("extractor_exception", url=current_url, error=str(e))
     return links_found
 
 
 # ---------------------------------------------------------------------------
-# SEO-FRIENDLY SMART URL KEYWORD SCRAPER ENGINE (Fixed For Custom Permalinks)
+# SEO-FRIENDLY SMART URL KEYWORD SCRAPER ENGINE
 # ---------------------------------------------------------------------------
 async def _live_website_search_scraper(query_text: str, target_base_url: str) -> tuple[list, str]:
     results = []
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Connection": "keep-alive"
-    }
-    
     clean_base = target_base_url.rstrip("/")
-    
-    # Hum 3 patterns test karenge: Slug search, parameter search aur homepage index tracking
     search_keywords = query_text.lower().replace(" ", "-")
     url_patterns = [
-        f"{clean_base}/{search_keywords}/",      # Aapka bataya hua pattern (SEO Slug format)
-        f"{clean_base}/?s={urllib.parse.quote_plus(query_text)}", # WordPress fallback
-        clean_base                                # Direct Homepage Scan fallback
+        f"{clean_base}/{search_keywords}/",      
+        f"{clean_base}/?s={urllib.parse.quote_plus(query_text)}", 
+        clean_base                                
     ]
     
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=30.0, headers=headers) as client:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=30.0, headers=STABLE_HEADERS) as client:
             candidate_urls = set()
             
-            # Loop through patterns until we secure matches
             for current_target in url_patterns:
                 try:
                     resp = await client.get(current_target)
@@ -138,16 +132,12 @@ async def _live_website_search_scraper(query_text: str, target_base_url: str) ->
                     soup = BeautifulSoup(resp.text, "html.parser")
                     anchors = soup.find_all("a", href=True)
                     
-                    # Agar hum direct target slug par hain aur page directly khul gaya
                     if search_keywords in current_target and len(anchors) > 5:
                         candidate_urls.add((current_target, query_text.title()))
                     
-                    # HTML structural page tracking
                     for a in anchors:
                         href = str(a["href"]).strip()
                         text = str(a.get_text()).strip()
-                        
-                        # Match keyword anywhere in URL structure or text string
                         if query_text.lower() in text.lower() or search_keywords in href.lower():
                             if href.startswith("http") and clean_base in href:
                                 candidate_urls.add((href, text if len(text) > 4 else query_text.title()))
@@ -155,13 +145,12 @@ async def _live_website_search_scraper(query_text: str, target_base_url: str) ->
                     continue
             
             if not candidate_urls:
-                return [], f"🔍 Website par '{query_text}' ki koi direct post match nahi mili."
+                return [], f"🔍 Website par '{query_text}' ki koi direct post ya page match nahi mila."
 
-            # Deep Brute-Force extract links from matched structural page nodes
             for page_url, title in list(candidate_urls)[:4]:
                 raw_extracted = await _recursive_link_extractor(client, page_url)
                 for href, _ in raw_extracted:
-                    url_slug = href.split("/")[-1] or "Stream Target Node"
+                    url_slug = href.split("/")[-1] or "Media Target Node"
                     clean_title = f"{title} - {url_slug[:25]}".replace("-", " ").replace("_", " ")
                     
                     class MockLinkItem:
@@ -181,11 +170,10 @@ async def _live_website_search_scraper(query_text: str, target_base_url: str) ->
 
 
 async def _deep_scrape_and_store_website(update: Update, target_url: str):
-    status_msg = await update.message.reply_text("🚀 **Bulk Scanner Active!** Webpage se saari links dhoondhi ja rahi hain...")
+    status_msg = await update.message.reply_text("🚀 **URL Extraction Active!** Bot is webpage ko deeply analyze kar raha hai...")
     try:
         clean_url = str(target_url).strip()
-        headers = {"User-Agent": "Mozilla/5.0"}
-        async with httpx.AsyncClient(follow_redirects=True, timeout=90, headers=headers) as client:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=45.0, headers=STABLE_HEADERS) as client:
             raw_extracted_links = await _recursive_link_extractor(client, clean_url)
             unique_links = {href: text for href, text in raw_extracted_links}
             
@@ -199,16 +187,14 @@ async def _deep_scrape_and_store_website(update: Update, target_url: str):
                     saved_count += 1
                 if saved_count > 0:
                     await session.commit()
-                    await status_msg.edit_text(f"🔥 **Super Bulk Success!** Total **{saved_count}** links database me save ho gayi hain!")
+                    await status_msg.edit_text(f"🔥 **Extraction Success!** Total **{saved_count}** core links successfully Supabase me store kar di gayi hain!")
                     return
-            await status_msg.edit_text("⚠️ No links extracted.")
+            await status_msg.edit_text("⚠️ Is webpage par brute-force tokenizer ko koi download link nahi mili. Ya toh page security se protected hai ya links hidden hain.")
     except Exception as e:
-        await status_msg.edit_text(f"❌ Error: {str(e)}")
+        await status_msg.edit_text(f"❌ Automation Connection Error: {str(e)}")
 
 
 async def list_all_stored_links_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_admin(update):
-        return
     async with AsyncSessionLocal() as session:
         repo = LinkRepository(session)
         all_records = await repo.search("")
@@ -239,21 +225,17 @@ async def core_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if is_explicit_search_command:
         parts = user_text_stripped.split(maxsplit=2)
         if len(parts) < 3:
-            await update.message.reply_text("⚠️ **Format Galat hai!**\nSahi tarika: `/search [website_url] [movie_name]`")
+            await update.message.reply_text("⚠️ **Format:** `/search [website_url] [movie_name]`")
             return
         chosen_website_base = parts[1]
         search_query = parts[2]
 
-    if _is_admin(update) and not is_explicit_search_command:
-        url_match = URL_REGEX.search(user_text)
-        if url_match:
-            url = url_match.group(0)
-            remainder = (user_text[:url_match.start()] + user_text[url_match.end():]).strip(" -:|\n")
-            if remainder and "scan" in remainder.lower() or not remainder:
-                await _deep_scrape_and_store_website(update, url)
-            else:
-                await _store_link_from_message(update, url, remainder)
-            return
+    # CHECK: Captures direct URLs for instant global scanning bypassing strict admin validations
+    url_match = URL_REGEX.search(user_text)
+    if url_match and not is_explicit_search_command:
+        url = url_match.group(0)
+        await _deep_scrape_and_store_website(update, url)
+        return
 
     # 1. Database Check
     matches = []
@@ -273,16 +255,16 @@ async def core_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                             if l.name == name and l not in matches:
                                 matches.append(l)
 
-    # 2. SEO-Friendly Smart Live Crawler
+    # 2. Live Scraper
     status_msg_text = ""
     if not matches and len(search_query) > 2:
-        status_searching = await update.message.reply_text(f"🔍 SEO Permalinks Tracker Active! Bot ab `{chosen_website_base}` par multi-patterns check kar raha hai...")
+        status_searching = await update.message.reply_text(f"🔍 Network Engine Active! Bot `{chosen_website_base}` par bypass simulation run kar raha hai...")
         matches, status_msg_text = await _live_website_search_scraper(search_query, chosen_website_base)
         await status_searching.delete()
 
     # UI Rendering
     if matches:
-        await update.message.reply_text(f"🔎 **{len(matches)} results** mile! Download quality chuney:", parse_mode="Markdown")
+        await update.message.reply_text(f"🔎 **{len(matches)} results** mile! Quality chuney:", parse_mode="Markdown")
         for m in matches:
             keyboard = [[
                 InlineKeyboardButton("🎥 480p", callback_data=f"bypass_{m.id}_480p"),
@@ -304,7 +286,7 @@ async def core_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         await update.message.reply_text(response.choices[0].message.content)
     except Exception:
-        await update.message.reply_text("⚠️ Movie mili nahi.")
+        await update.message.reply_text("⚠️ Engine Timeout.")
 
 
 # ---------------------------------------------------------------------------
