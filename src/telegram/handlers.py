@@ -53,6 +53,89 @@ async def _store_link_from_message(update: Update, url: str, remainder: str):
     await update.message.reply_text(f"✅ **Saved Link:**\n📝 *Name:* {name}\n🔗 *URL:* {url}", parse_mode="Markdown")
 
 
+async def _deep_scrape_and_store_website(update: Update, target_url: str):
+    """
+    Website ko browse karke saare potential download/stream links auto-detect karta hai,
+    unki quality aur language identify karta hai, aur database me store karta hai.
+    """
+    status_msg = await update.message.reply_text("🌐 Website ko scan aur links extract kiya ja raha hai, please wait...")
+    
+    try:
+        # String format clean up to avoid 'human_repr' attribute errors
+        clean_url = str(target_url).strip()
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        
+        async with httpx.AsyncClient(follow_redirects=True, timeout=20, headers=headers) as client:
+            resp = await client.get(clean_url)
+            if resp.status_code != 200:
+                await status_msg.edit_text(f"❌ Website scan fail ho gaya. Status Code: {resp.status_code}")
+                return
+                
+            soup = BeautifulSoup(resp.text, "html.parser")
+            all_links = soup.find_all("a", href=True)
+            
+            saved_count = 0
+            async with AsyncSessionLocal() as session:
+                repo = LinkRepository(session)
+                
+                for link in all_links:
+                    href = str(link["href"]).strip()
+                    text = str(link.get_text()).strip()
+                    
+                    # Target patterns for general media/download links
+                    href_lower = href.lower()
+                    text_lower = text.lower()
+                    
+                    is_valid_download = any(x in href_lower or x in text_lower for x in [
+                        "drive", "mega", "download", "gdrive", "gplinks", "zippyshare", 
+                        "mediafire", "pixeldrain", "1fichier", "torrent", "magnet:", ".mkv", ".mp4"
+                    ])
+                    
+                    # Valid external link checklist
+                    if is_valid_download and href.startswith(("http", "magnet")):
+                        # Auto-detect Quality
+                        quality = "Unknown"
+                        if "480p" in href_lower or "480p" in text_lower:
+                            quality = "480p"
+                        elif "720p" in href_lower or "720p" in text_lower:
+                            quality = "720p"
+                        elif "1080p" in href_lower or "1080p" in text_lower:
+                            quality = "1080p"
+                        elif "2160p" in href_lower or "4k" in href_lower or "4k" in text_lower:
+                            quality = "4K UltraHD"
+                            
+                        # Auto-detect Language
+                        language = "Unknown"
+                        if "hindi" in href_lower or "hindi" in text_lower:
+                            language = "Hindi"
+                        elif "english" in href_lower or "english" in text_lower:
+                            language = "English"
+                        elif "dual" in href_lower or "dual" in text_lower:
+                            language = "Dual Audio"
+                        elif "multi" in href_lower or "multi" in text_lower:
+                            language = "Multi Audio"
+
+                        # Build descriptive clean name
+                        extracted_name = text if len(text) > 5 else "Extracted Media Link"
+                        final_name = f"{extracted_name} [{quality}] [{language}]".strip()
+                        
+                        await repo.add_link(name=final_name, url=href, added_by=update.effective_user.id)
+                        saved_count += 1
+                
+                if saved_count > 0:
+                    await session.commit()
+                    await status_msg.edit_text(f"✅ **Success!** Website se kul **{saved_count}** valid download links extract karke Supabase me store kar diye gaye hain!")
+                else:
+                    await status_msg.edit_text("⚠️ Website successfully scan hui, par koi direct download/media links nahi mile.")
+                    
+    except Exception as e:
+        logger.error("bulk_website_scrape_failed", error=str(e))
+        await status_msg.edit_text(f"❌ Website scan fail ho gaya: {str(e)}")
+
+
 async def _handle_owner_code_task(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str):
     status_msg = await update.message.reply_text("🧠 Coding task analyze kar raha hoon...")
     try:
@@ -112,19 +195,19 @@ async def _bypass_website_ads_engine(original_url: str, quality: str) -> str:
     """Background scraper/bypasser to clean shortener pages and fetch source url."""
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
-            resp = await client.get(original_url)
+            resp = await client.get(str(original_url).strip())
             soup = BeautifulSoup(resp.text, "html.parser")
             all_links = soup.find_all("a", href=True)
             
             for link in all_links:
-                href = link["href"]
-                text = link.get_text().lower()
-                if quality in text or (quality in href and "download" in text):
+                href = str(link["href"]).strip()
+                text = str(link.get_text()).lower()
+                if quality in text or (quality in href.lower() and "download" in text):
                     return href
             for link in all_links:
-                href_lower = link["href"].lower()
+                href_lower = str(link["href"]).lower().strip()
                 if any(x in href_lower for x in ["drive", "mega", "download", "gdrive", "gplinks"]):
-                    return link["href"]
+                    return str(link["href"]).strip()
     except Exception as e:
         logger.error("Bypass module error", error=str(e))
     return original_url
@@ -171,7 +254,12 @@ async def core_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         if url_match:
             url = url_match.group(0)
             remainder = (user_text[:url_match.start()] + user_text[url_match.end():]).strip(" -:|\n")
-            await _store_link_from_message(update, url, remainder)
+            
+            # Agar sirf plain link hai ya kuch custom word short link hai toh extract mode switch
+            if remainder and "scan" in remainder.lower() or not remainder:
+                await _deep_scrape_and_store_website(update, url)
+            else:
+                await _store_link_from_message(update, url, remainder)
             return
 
         intent = await classify_intent(user_text)
