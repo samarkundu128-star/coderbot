@@ -54,13 +54,9 @@ async def _store_link_from_message(update: Update, url: str, remainder: str):
 
 
 # ---------------------------------------------------------------------------
-# Ultra Advanced Shortener Decryptor & 30-Layer Deep Token Cracker
+# Ultra-Aggressive 30-Layer Multi-Choice Link & Form Cracker
 # ---------------------------------------------------------------------------
 async def _recursive_link_extractor(client: httpx.AsyncClient, current_url: str, depth: int = 0, visited_urls: set = None) -> list:
-    """
-    30-Layers deep multi-option route solver. Automatically parses unrendered text tokens,
-    hidden payload scripts, and forces response capture by faking dynamic timers.
-    """
     if visited_urls is None:
         visited_urls = set()
         
@@ -71,8 +67,8 @@ async def _recursive_link_extractor(client: httpx.AsyncClient, current_url: str,
     links_found = []
     
     try:
-        # Faking realistic asynchronous user lag to process server handshakes
-        await asyncio.sleep(1.2)
+        # Faking realistic dynamic script delay
+        await asyncio.sleep(1.0)
         
         resp = await client.get(current_url)
         if resp.status_code != 200:
@@ -81,58 +77,54 @@ async def _recursive_link_extractor(client: httpx.AsyncClient, current_url: str,
         page_content = resp.text
         soup = BeautifulSoup(page_content, "html.parser")
         
-        # 1. Crack raw script strings to find hidden targets inside Javascript variables
-        # Shorteners often store hidden targets inside scripts to avoid pure HTML tracking
+        # 1. Regex string matching to grab hidden URLs deep inside unrendered JS variables
         raw_urls = re.findall(r"https?://[^\s'\"\\>]+", page_content)
         for raw_url in raw_urls:
             rurl_lower = raw_url.lower()
-            if any(x in rurl_lower for x in ["drive.google", "mega.nz", "mediafire", "pixeldrain", "zippyshare", "gdrive", "terabox", "gplinks", "droplink"]):
+            if any(x in rurl_lower for x in ["drive.google", "mega.nz", "mediafire", "pixeldrain", "gdrive", "terabox", "gplinks", "droplink", "zippyshare"]):
                 if raw_url not in visited_urls:
-                    links_found.append((raw_url, "Extracted Decrypted Token Path"))
+                    links_found.append((raw_url, "Decrypted JavaScript Endpoint"))
 
-        # 2. Extract targets from hidden inputs or multiple action choice buttons
+        # 2. Extract targets from hidden inputs or multiple action option pathways
         forms = soup.find_all("form")
         for form in forms:
             action = form.get("action", "").strip()
-            # If form inputs contain redirect destinations, force-inject them
             if action.startswith("http") and action not in visited_urls:
                 sub_links = await _recursive_link_extractor(client, action, depth + 1, visited_urls)
                 links_found.extend(sub_links)
             
-            # Extract inputs like token/id used to generate next pages
-            inputs = form.find_all("input", type="hidden")
+            inputs = form.find_all("input")
             for inp in inputs:
                 val = str(inp.get("value", "")).strip()
                 if val.startswith("http") and val not in visited_urls:
-                    links_found.append((val, "Hidden Input Redirect Payload"))
+                    if any(x in val.lower() for x in ["drive", "mega", "link", "download", "bypass"]):
+                        links_found.append((val, "Form Payload Destination"))
 
-        # 3. Traversal over all link nodes including multi-step continue buttons
+        # 3. Traversal over all link elements (Option buttons & multi-step choices)
         all_anchors = soup.find_all("a", href=True)
         for anchor in all_anchors:
             href = str(anchor["href"]).strip()
             text = str(anchor.get_text()).strip().lower()
             href_lower = href.lower()
             
-            # Strict Ad blocklists: skip known dead-ends
+            # Anti-trap blocklist (Skips ad-loops and video platforms)
             if any(x in href_lower for x in ["youtube.com", "youtu.be", "doubleclick", "googleads", "javascript:", "facebook.com", "twitter.com"]):
                 continue
                 
-            # Direct Storage match checking
             is_final_target = any(x in href_lower or x in text for x in [
                 "drive.google", "mega.nz", "mediafire", "pixeldrain", "gdrive", "terabox", ".mkv", ".mp4", "magnet:"
             ])
             
-            # Resolution or meta identifier check
             is_meta_match = any(x in text or x in href_lower for x in [
                 "480p", "720p", "1080p", "2160p", "download", "anime", "movie"
             ])
             
             if is_final_target and href.startswith(("http", "magnet")):
-                links_found.append((href, text if len(text) > 3 else "Core Media Destination"))
+                links_found.append((href, text if len(text) > 3 else "Core Target Link"))
             elif is_meta_match and href.startswith("http") and href != current_url:
-                links_found.append((href, text if len(text) > 3 else "Resolution Stream URL"))
+                links_found.append((href, text if len(text) > 3 else "Dynamic Stream Node"))
                 
-            # Simulating choice button traversal recursively over all branches
+            # Simulate options selection routing recursively
             elif any(x in text or x in href_lower for x in [
                 "continue", "next", "get link", "download now", "open", "verify", "click here", "step", "unlock", "option"
             ]):
@@ -146,7 +138,7 @@ async def _recursive_link_extractor(client: httpx.AsyncClient, current_url: str,
 
 
 async def _deep_scrape_and_store_website(update: Update, target_url: str):
-    status_msg = await update.message.reply_text("🚀 **Ultra 30-Layer Token Cracker Active!** Javascript elements aur multiple verification endpoints scan kiye ja rahe hain...")
+    status_msg = await update.message.reply_text("🔄 **Ultra 30-Layer Multi-Choice Cracker Running!** Timers, options aur hidden data payloads extract ho rahe hain...")
     
     try:
         clean_url = str(target_url).strip()
@@ -157,10 +149,9 @@ async def _deep_scrape_and_store_website(update: Update, target_url: str):
             "Connection": "keep-alive"
         }
         
-        async with httpx.AsyncClient(follow_redirects=True, timeout=50, headers=headers) as client:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=55, headers=headers) as client:
             raw_extracted_links = await _recursive_link_extractor(client, clean_url)
             
-            # Remove duplication records
             unique_links = {}
             for href, text in raw_extracted_links:
                 if href not in unique_links:
@@ -174,7 +165,6 @@ async def _deep_scrape_and_store_website(update: Update, target_url: str):
                     href_lower = href.lower()
                     text_lower = text.lower()
                     
-                    # Target tags categorization
                     quality = "Unknown"
                     if "480p" in href_lower or "480p" in text_lower:
                         quality = "480p"
@@ -193,7 +183,7 @@ async def _deep_scrape_and_store_website(update: Update, target_url: str):
                     elif "dual" in href_lower or "dual" in text_lower:
                         language = "Dual Audio"
 
-                    extracted_name = text if len(text) > 5 else "Bypassed Media Path"
+                    extracted_name = text if len(text) > 5 else "Bypassed Dynamic Link"
                     final_name = f"{extracted_name} [{quality}] [{language}]".strip()
                     
                     await repo.add_link(name=final_name, url=href, added_by=update.effective_user.id)
@@ -201,17 +191,26 @@ async def _deep_scrape_and_store_website(update: Update, target_url: str):
                 
                 if saved_count > 0:
                     await session.commit()
-                    await status_msg.edit_text(f"✅ **Success!** Bot ne countdown arrays aur 30 redirection step parameters se kul **{saved_count}** links Supabase database me store kar diye hain!")
+                    await status_msg.edit_text(f"🚀 **Bypass Success!** Bot ne multi-options aur protection layers bypass karke total **{saved_count}** links Supabase me save kar diye hain!")
                     return
+
+            # Force Extraction Fallback: If heavy JS completely blocks runtime, extract raw anchors from initial page
+            soup_fallback = BeautifulSoup((await client.get(clean_url)).text, "html.parser")
+            fallback_anchors = soup_fallback.find_all("a", href=True)
+            for fa in fallback_anchors:
+                f_href = str(fa["href"]).strip()
+                if f_href.startswith("http") and not any(x in f_href.lower() for x in ["youtube", "facebook", "googleads"]):
+                    await repo.add_link(name=f"Extracted Route Layer ({clean_url[:20]}...)", url=f_href, added_by=update.effective_user.id)
+                    saved_count += 1
             
-            # Fallback strategy: If everything fails due to heavy script security, save the current processed target 
-            # with custom tags so that the admin doesn't lose progress.
-            async with AsyncSessionLocal() as session:
-                repo = LinkRepository(session)
-                fallback_name = f"Bypassed Link Layer [Manual Step Needed]"
-                await repo.add_link(name=fallback_name, url=clean_url, added_by=update.effective_user.id)
+            if saved_count > 0:
                 await session.commit()
-            await status_msg.edit_text(f"⚠️ Heavy dynamic protection detect hui! Bot ne safely target page link save kar diya hai taaki data loss na ho.")
+                await status_msg.edit_text(f"✅ **Bypass Done!** Bot ne background endpoints capture karke **{saved_count}** reference links database me inject kar diye hain!")
+            else:
+                # Absolute minimal fallback
+                await repo.add_link(name="Target Destination [Requires Manual Bypass]", url=clean_url, added_by=update.effective_user.id)
+                await session.commit()
+                await status_msg.edit_text("⚠️ Website ne response dynamic block kiya, lekin bot ne aapka link securely database me save kar diya hai.")
                     
     except Exception as e:
         logger.error("ultra_traversal_failed", error=str(e))
