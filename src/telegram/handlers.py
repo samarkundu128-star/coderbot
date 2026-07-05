@@ -28,8 +28,7 @@ _ai_engine = AICodingEngine()
 URL_REGEX = re.compile(r"https?://[^\s]+")
 BRUTE_FORCE_URL_REGEX = re.compile(r"https?://[^\s'\"\\><\}\{\[\]\)\(,\n\r\t]+")
 
-# ⚠️ APNI DEFAULT WEBSITE KA BASE URL YAHA SET KAREIN
-# Agar koi user bina website ke sirf naam likhega, toh bot is site par dhoondhega.
+# ⚠️ DEFAULT TARGET WEBSITE
 DEFAULT_TARGET_WEBSITE = "https://gplinks.com" 
 
 SYSTEM_PROMPT = """You are an elite coding assistant. When given a task, respond ONLY with a valid JSON object — no markdown fences, no extra commentary, nothing outside the JSON.
@@ -59,27 +58,26 @@ async def _store_link_from_message(update: Update, url: str, remainder: str):
 
 
 # ---------------------------------------------------------------------------
-# Brute-Force Raw Text Tokenizer (Hidden Variable & JavaScript Array Extractor)
+# Brute-Force Raw Text Tokenizer (With Enhanced Error Resiliency)
 # ---------------------------------------------------------------------------
 async def _recursive_link_extractor(client: httpx.AsyncClient, current_url: str, depth: int = 0, visited_urls: set = None) -> list:
     if visited_urls is None:
         visited_urls = set()
         
-    if depth > 15 or current_url in visited_urls:
+    if depth > 12 or current_url in visited_urls:
         return []
         
     visited_urls.add(current_url)
     links_found = []
     
     try:
-        await asyncio.sleep(0.3)
-        resp = await client.get(current_url)
+        await asyncio.sleep(0.4) # Polite delay to avoid instant rate limiting
+        resp = await client.get(current_url, timeout=15.0)
         if resp.status_code != 200:
             return []
             
         page_content = resp.text
         
-        # Extractor Step: Pull any URL from raw code matching stream networks
         all_raw_strings = BRUTE_FORCE_URL_REGEX.findall(page_content)
         for raw_url in all_raw_strings:
             rurl_lower = raw_url.lower()
@@ -100,35 +98,45 @@ async def _recursive_link_extractor(client: httpx.AsyncClient, current_url: str,
                     sub_links = await _recursive_link_extractor(client, href, depth + 1, visited_urls)
                     links_found.extend(sub_links)
                     
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("extractor_depth_exception", url=current_url, error=str(e))
     return links_found
 
 
 # ---------------------------------------------------------------------------
-# DYNAMIC MULTI-WEBSITE LIVE SEARCH ENGINE
+# STABLE LIVE WEBSITE SEARCH SCRAPER ENGINE
 # ---------------------------------------------------------------------------
-async def _live_website_search_scraper(query_text: str, target_base_url: str) -> list:
+async def _live_website_search_scraper(query_text: str, target_base_url: str) -> tuple[list, str]:
     """
-    Website base URL aur query text lekar live network hit marta hai 
-    aur on-the-fly bulk data elements extract karta hai.
+    Returns a tuple: (results_list, error_or_status_message)
     """
     results = []
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Connection": "keep-alive"
     }
     
     clean_base = target_base_url.rstrip("/")
     encoded_query = urllib.parse.quote_plus(query_text)
-    
-    # Standard query search URL payload builder (?s=query)
     search_url = f"{clean_base}/?s={encoded_query}"
     
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=25, headers=headers) as client:
-            resp = await client.get(search_url)
+        # Increased timeouts to 35 seconds to sustain heavy cloud protection delays
+        async with httpx.AsyncClient(follow_redirects=True, timeout=35.0, headers=headers) as client:
+            try:
+                resp = await client.get(search_url)
+            except httpx.TimeoutException:
+                return [], f"⚠️ Target website (`{clean_base}`) ne response dene me bohot time lagaya (Timeout). Site shayad down hai ya slow hai."
+            except httpx.NetworkError:
+                return [], "⚠️ Network error! Website URL galat hai ya bot connect nahi kar paa raha."
+
+            if resp.status_code == 403 or resp.status_code == 429:
+                return [], f"🚫 Website ne Bot ko block kar diya (Status Code: {resp.status_code}). Site par Cloudflare ya Anti-Bot Protection active hai."
+                
             if resp.status_code != 200:
-                return []
+                return [], f"⚠️ Website se sahi response nahi mila (Status Code: {resp.status_code})."
                 
             soup = BeautifulSoup(resp.text, "html.parser")
             anchors = soup.find_all("a", href=True)
@@ -142,7 +150,9 @@ async def _live_website_search_scraper(query_text: str, target_base_url: str) ->
                     if href.startswith("http") and clean_base in href:
                         candidate_urls.add((href, text if len(text) > 4 else query_text))
             
-            # Deep scan top 3 search results pages for immediate recovery
+            if not candidate_urls:
+                return [], f"🔍 Website par '{query_text}' naam se koi post ya page nahi mila."
+
             for page_url, title in list(candidate_urls)[:3]:
                 raw_extracted = await _recursive_link_extractor(client, page_url)
                 for href, _ in raw_extracted:
@@ -160,8 +170,9 @@ async def _live_website_search_scraper(query_text: str, target_base_url: str) ->
                     
     except Exception as e:
         logger.error("live_dynamic_search_failed", error=str(e))
+        return [], f"❌ Internal system error occurred during live crawling: {str(e)}"
         
-    return results
+    return results, "SUCCESS"
 
 
 async def _deep_scrape_and_store_website(update: Update, target_url: str):
@@ -216,7 +227,6 @@ async def core_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await list_all_stored_links_command(update, context)
         return
 
-    # Multi-Website Dynamic Command Check (`/search https://site.com naruto`)
     is_explicit_search_command = user_text_stripped.startswith("/search")
     chosen_website_base = DEFAULT_TARGET_WEBSITE
     search_query = user_text_stripped
@@ -240,7 +250,7 @@ async def core_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 await _store_link_from_message(update, url, remainder)
             return
 
-    # 1. Pehle local database me check karo (Agar normal keyword query hai toh fuzzy search chalao)
+    # 1. Pehle local database me check karo
     matches = []
     if not is_explicit_search_command:
         async with AsyncSessionLocal() as session:
@@ -259,9 +269,10 @@ async def core_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                                 matches.append(l)
 
     # 2. Agar database me nahi mila ya explicit command hai, toh WEBSITE PAR LIVE JAAO!
+    status_msg_text = ""
     if not matches and len(search_query) > 2:
-        status_searching = await update.message.reply_text(f"🔍 Live Search Engine Active! Bot ab `{chosen_website_base}` par jaakar live '{search_query}' dhoondh raha hai...")
-        matches = await _live_website_search_scraper(search_query, chosen_website_base)
+        status_searching = await update.message.reply_text(f"🔍 Live Search Engine Active! Bot ab `{chosen_website_base}` par jaakar live '{search_query}' dhoondh raha hai, thoda waqt lag sakta hai...")
+        matches, status_msg_text = await _live_website_search_scraper(search_query, chosen_website_base)
         await status_searching.delete()
 
     # Delivery response block
@@ -277,11 +288,16 @@ async def core_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(f"🎬 *{m.name}*", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
-    if is_explicit_search_command:
-        await update.message.reply_text(f"❌ Afsos! Website `{chosen_website_base}` par '{search_query}' naam ki koi post ya link nahi mili.")
+    # Agar website search se koi error message aaya hai toh use directly user ko dikhayein
+    if status_msg_text and status_msg_text != "SUCCESS":
+        await update.message.reply_text(status_msg_text, parse_mode="Markdown")
         return
 
-    # Chat fallback
+    if is_explicit_search_command:
+        await update.message.reply_text(f"❌ Website `{chosen_website_base}` par '{search_query}' naam ki koi post nahi mili.")
+        return
+
+    # Groq AI chat fallback
     try:
         response = groq_client.chat.completions.create(
             model=GROQ_MODEL,
@@ -289,7 +305,7 @@ async def core_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         await update.message.reply_text(response.choices[0].message.content)
     except Exception:
-        await update.message.reply_text("⚠️ Movie mili nahi aur server busy hai.")
+        await update.message.reply_text("⚠️ Movie database/site par nahi mili aur AI engine busy hai. Sahi naam likhein.")
 
 
 # ---------------------------------------------------------------------------
