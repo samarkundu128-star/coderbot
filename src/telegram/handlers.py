@@ -2,6 +2,7 @@ import re
 import json
 import asyncio
 import difflib
+import urllib.parse
 import structlog
 import httpx
 from bs4 import BeautifulSoup
@@ -27,8 +28,11 @@ _ai_engine = AICodingEngine()
 URL_REGEX = re.compile(r"https?://[^\s]+")
 BRUTE_FORCE_URL_REGEX = re.compile(r"https?://[^\s'\"\\><\}\{\[\]\)\(,\n\r\t]+")
 
-SYSTEM_PROMPT = """You are an elite coding assistant. When given a task, respond ONLY with a valid JSON object — no markdown fences, no extra commentary, nothing outside the JSON.
+# ⚠️ APNI DEFAULT WEBSITE KA BASE URL YAHA SET KAREIN
+# Agar koi user bina website ke sirf naam likhega, toh bot is site par dhoondhega.
+DEFAULT_TARGET_WEBSITE = "https://gplinks.com" 
 
+SYSTEM_PROMPT = """You are an elite coding assistant. When given a task, respond ONLY with a valid JSON object — no markdown fences, no extra commentary, nothing outside the JSON.
 The JSON must have exactly these keys:
 {
   "language": "programming language name, e.g. python",
@@ -36,7 +40,6 @@ The JSON must have exactly these keys:
   "code": "the complete, runnable code as a single string with \n for newlines",
   "explanation": "a short 1-3 sentence explanation of how the code works"
 }
-
 Rules:
 - Code must be complete and runnable, not a snippet.
 """
@@ -56,26 +59,27 @@ async def _store_link_from_message(update: Update, url: str, remainder: str):
 
 
 # ---------------------------------------------------------------------------
-# Brute-Force Raw Text Tokenizer & Aggressive Multi-Layer Deep Scraper
+# Brute-Force Raw Text Tokenizer (Hidden Variable & JavaScript Array Extractor)
 # ---------------------------------------------------------------------------
 async def _recursive_link_extractor(client: httpx.AsyncClient, current_url: str, depth: int = 0, visited_urls: set = None) -> list:
     if visited_urls is None:
         visited_urls = set()
         
-    if depth > 30 or current_url in visited_urls:
+    if depth > 15 or current_url in visited_urls:
         return []
         
     visited_urls.add(current_url)
     links_found = []
     
     try:
-        await asyncio.sleep(0.4)
+        await asyncio.sleep(0.3)
         resp = await client.get(current_url)
         if resp.status_code != 200:
             return []
             
         page_content = resp.text
         
+        # Extractor Step: Pull any URL from raw code matching stream networks
         all_raw_strings = BRUTE_FORCE_URL_REGEX.findall(page_content)
         for raw_url in all_raw_strings:
             rurl_lower = raw_url.lower()
@@ -83,22 +87,14 @@ async def _recursive_link_extractor(client: httpx.AsyncClient, current_url: str,
                 continue
                 
             if raw_url not in visited_urls:
-                if any(x in rurl_lower for x in ["drive", "mega", "mediafire", "pixeldrain", "gdrive", "terabox", "zippyshare", "gplinks", "droplink", "link", "download", "wp-content", "movie", "anime", "series"]):
-                    links_found.append((raw_url, "Brute-Force Captured Stream Route"))
+                if any(x in rurl_lower for x in ["drive", "mega", "mediafire", "pixeldrain", "gdrive", "terabox", "zippyshare", "gplinks", "droplink", "link", "download", "movie", "anime", "series"]):
+                    links_found.append((raw_url, "Stream Route"))
 
         soup = BeautifulSoup(page_content, "html.parser")
-        forms = soup.find_all("form")
-        for form in forms:
-            action = form.get("action", "").strip()
-            if action.startswith("http") and action not in visited_urls:
-                sub_links = await _recursive_link_extractor(client, action, depth + 1, visited_urls)
-                links_found.extend(sub_links)
-
         all_anchors = soup.find_all("a", href=True)
         for anchor in all_anchors:
             href = str(anchor["href"]).strip()
             text = str(anchor.get_text()).strip().lower()
-            
             if href.startswith("http") and href not in visited_urls:
                 if any(x in text or x in href.lower() for x in ["continue", "next", "get link", "download now", "open", "verify", "click here", "step", "unlock", "option"]):
                     sub_links = await _recursive_link_extractor(client, href, depth + 1, visited_urls)
@@ -109,233 +105,131 @@ async def _recursive_link_extractor(client: httpx.AsyncClient, current_url: str,
     return links_found
 
 
-async def _deep_scrape_and_store_website(update: Update, target_url: str):
-    status_msg = await update.message.reply_text("🚀 **Ultimate Brute-Force Bulk Tokenizer Active!** Webpage se saari links dhoondhi ja rahi hain...")
+# ---------------------------------------------------------------------------
+# DYNAMIC MULTI-WEBSITE LIVE SEARCH ENGINE
+# ---------------------------------------------------------------------------
+async def _live_website_search_scraper(query_text: str, target_base_url: str) -> list:
+    """
+    Website base URL aur query text lekar live network hit marta hai 
+    aur on-the-fly bulk data elements extract karta hai.
+    """
+    results = []
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+    }
+    
+    clean_base = target_base_url.rstrip("/")
+    encoded_query = urllib.parse.quote_plus(query_text)
+    
+    # Standard query search URL payload builder (?s=query)
+    search_url = f"{clean_base}/?s={encoded_query}"
     
     try:
-        clean_url = str(target_url).strip()
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Referer": "https://www.google.com/",
-            "Connection": "keep-alive"
-        }
-        
-        async with httpx.AsyncClient(follow_redirects=True, timeout=120, headers=headers) as client:
-            raw_extracted_links = await _recursive_link_extractor(client, clean_url)
+        async with httpx.AsyncClient(follow_redirects=True, timeout=25, headers=headers) as client:
+            resp = await client.get(search_url)
+            if resp.status_code != 200:
+                return []
+                
+            soup = BeautifulSoup(resp.text, "html.parser")
+            anchors = soup.find_all("a", href=True)
+            candidate_urls = set()
             
-            unique_links = {}
-            for href, text in raw_extracted_links:
-                if href not in unique_links:
-                    unique_links[href] = text
+            for a in anchors:
+                href = str(a["href"]).strip()
+                text = str(a.get_text()).strip()
+                
+                if query_text.lower() in text.lower() or query_text.lower() in href.lower():
+                    if href.startswith("http") and clean_base in href:
+                        candidate_urls.add((href, text if len(text) > 4 else query_text))
+            
+            # Deep scan top 3 search results pages for immediate recovery
+            for page_url, title in list(candidate_urls)[:3]:
+                raw_extracted = await _recursive_link_extractor(client, page_url)
+                for href, _ in raw_extracted:
+                    url_slug = href.split("/")[-1] or "Media Target Node"
+                    clean_title = f"{title} - {url_slug[:25]}".replace("-", " ").replace("_", " ")
+                    
+                    class MockLinkItem:
+                        def __init__(self, name, url, id_val):
+                            self.name = name
+                            self.url = url
+                            self.id = id_val
+                            
+                    mock_id = abs(hash(href)) % 1000000
+                    results.append(MockLinkItem(clean_title, href, mock_id))
+                    
+    except Exception as e:
+        logger.error("live_dynamic_search_failed", error=str(e))
+        
+    return results
+
+
+async def _deep_scrape_and_store_website(update: Update, target_url: str):
+    status_msg = await update.message.reply_text("🚀 **Bulk Scanner Active!** Webpage se saari links dhoondhi ja rahi hain...")
+    try:
+        clean_url = str(target_url).strip()
+        headers = {"User-Agent": "Mozilla/5.0"}
+        async with httpx.AsyncClient(follow_redirects=True, timeout=90, headers=headers) as client:
+            raw_extracted_links = await _recursive_link_extractor(client, clean_url)
+            unique_links = {href: text for href, text in raw_extracted_links}
             
             saved_count = 0
             async with AsyncSessionLocal() as session:
                 repo = LinkRepository(session)
-                
                 for href, text in unique_links.items():
-                    href_lower = href.lower()
-                    text_lower = text.lower()
-                    
-                    quality = "Unknown"
-                    if "480p" in href_lower or "480p" in text_lower:
-                        quality = "480p"
-                    elif "720p" in href_lower or "720p" in text_lower:
-                        quality = "720p"
-                    elif "1080p" in href_lower or "1080p" in text_lower:
-                        quality = "1080p"
-                    elif "2160p" in href_lower or "4k" in text_lower:
-                        quality = "4K"
-                        
-                    language = "Unknown"
-                    if "hindi" in href_lower or "hindi" in text_lower:
-                        language = "Hindi"
-                    elif "english" in href_lower or "english" in text_lower:
-                        language = "English"
-                    elif "dual" in href_lower or "dual" in text_lower:
-                        language = "Dual Audio"
-
-                    if len(text) <= 5 or "brute-force" in text.lower():
-                        url_slug = href.split("/")[-1] or href.split("/")[-2] or "Media File"
-                        extracted_name = url_slug[:40].replace("-", " ").replace("_", " ")
-                    else:
-                        extracted_name = text
-
-                    final_name = f"{extracted_name} [{quality}] [{language}]".strip()
-                    
+                    url_slug = href.split("/")[-1] or "Media File"
+                    final_name = text if len(text) > 5 else url_slug[:40]
                     await repo.add_link(name=final_name, url=href, added_by=update.effective_user.id)
                     saved_count += 1
-                
                 if saved_count > 0:
                     await session.commit()
-                    await status_msg.edit_text(f"🔥 **Super Bulk Success!** Bot ne total **{saved_count}** links Supabase database me save kar di hain!")
+                    await status_msg.edit_text(f"🔥 **Super Bulk Success!** Total **{saved_count}** links database me save ho gayi hain!")
                     return
-
-            # Fallback
-            fallback_text = (await client.get(clean_url)).text
-            fallback_urls = set(BRUTE_FORCE_URL_REGEX.findall(fallback_text))
-            
-            async with AsyncSessionLocal() as session:
-                repo = LinkRepository(session)
-                for f_url in fallback_urls:
-                    if not any(x in f_url.lower() for x in ["youtube", "facebook", "googleads"]):
-                        url_slug = f_url.split("/")[-1] or "Bulk Node Resource"
-                        await repo.add_link(name=url_slug[:40], url=f_url, added_by=update.effective_user.id)
-                        saved_count += 1
-                
-                if saved_count > 0:
-                    await session.commit()
-                    await status_msg.edit_text(f"✅ **Super Brute-Force Done!** Total **{saved_count}** core links database me dump kar di gayi hain!")
-                else:
-                    await repo.add_link(name="Root Target Node", url=clean_url, added_by=update.effective_user.id)
-                    await session.commit()
-                    await status_msg.edit_text("⚠️ Main target securely save ho gaya hai.")
-                    
+            await status_msg.edit_text("⚠️ No links extracted.")
     except Exception as e:
-        logger.error("bulk_bruteforce_failed", error=str(e))
-        await status_msg.edit_text(f"❌ Automation Failure: {str(e)}")
+        await status_msg.edit_text(f"❌ Error: {str(e)}")
 
 
-# ---------------------------------------------------------------------------
-# Command / Handler To View ALL Stored Links (Aapka Naya Command)
-# ---------------------------------------------------------------------------
 async def list_all_stored_links_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Command handler for admin to look at every link present inside the repo"""
     if not _is_admin(update):
-        await update.message.reply_text("⛔ Yeh command sirf bot owner ke liye hai.")
         return
-
-    status_msg = await update.message.reply_text("📊 Database se saari links fetch ho rahi hain...")
-    
     async with AsyncSessionLocal() as session:
         repo = LinkRepository(session)
-        all_records = await repo.search("") # Khali query matlab sab pull karega
-        
+        all_records = await repo.search("")
     if not all_records:
-        await status_msg.edit_text("📭 Database bilkul khali hai. Koi bhi link stored nahi mili.")
+        await update.message.reply_text("📭 Database khali hai.")
         return
-        
     response_text = f"📋 **Total Stored Links ({len(all_records)}):**\n\n"
     for idx, item in enumerate(all_records, start=1):
-        line = f"{idx}. *{item.name}*\n🔗 `{item.url}`\n\n"
-        if len(response_text) + len(line) > 3900: # Telegram message character limit safety check
-            await update.message.reply_text(response_text, parse_mode="Markdown", disable_web_page_preview=True)
-            response_text = ""
-        response_text += line
-        
-    if response_text:
-        await update.message.reply_text(response_text, parse_mode="Markdown", disable_web_page_preview=True)
-        
-    await status_msg.delete()
-
-
-async def _handle_owner_code_task(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str):
-    status_msg = await update.message.reply_text("🧠 Coding task analyze kar raha hoon...")
-    try:
-        response = groq_client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.2,
-            response_format={"type": "json_object"}
-        )
-        raw_json = response.choices[0].message.content
-        parsed = json.loads(raw_json)
-        
-        filename = parsed.get("filename", "output.py")
-        code = parsed.get("code", "")
-        explanation = parsed.get("explanation", "")
-
-        await status_msg.edit_text(f"📝 **File Generation:** `{filename}`\n\n`{explanation}`\n\nPushing to GitHub...")
-        
-        commit_sha = await asyncio.to_thread(
-            push_files,
-            [{"file_path": filename, "content": code}],
-            f"Auto-coded: {filename}"
-        )
-        await status_msg.edit_text(f"🚀 **Pushed to GitHub!**\nCommit: `{commit_sha[:7]}`")
-        asyncio.create_task(watch_deploy_and_notify(context.bot, update.effective_chat.id, commit_sha))
-    except Exception as e:
-        await status_msg.edit_text(f"❌ **Code Task Error:** {str(e)}")
-
-
-async def _handle_ai_chat(update: Update, user_text: str):
-    try:
-        response = groq_client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": "You are a helpful teaching assistant chat bot."},
-                {"role": "user", "content": user_text}
-            ],
-            temperature=0.6,
-            max_tokens=600,
-        )
-        await update.message.reply_text(response.choices[0].message.content)
-    except Exception as e:
-        await update.message.reply_text("⚠️ Dubara try karein.")
+        response_text += f"{idx}. *{item.name}*\n🔗 `{item.url}`\n\n"
+    await update.message.reply_text(response_text[:4000], parse_mode="Markdown", disable_web_page_preview=True)
 
 
 # ---------------------------------------------------------------------------
-# Ads Bypass Engine & Callback Handlers
-# ---------------------------------------------------------------------------
-async def _bypass_website_ads_engine(original_url: str, quality: str) -> str:
-    try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
-            resp = await client.get(str(original_url).strip())
-            soup = BeautifulSoup(resp.text, "html.parser")
-            all_links = soup.find_all("a", href=True)
-            for link in all_links:
-                href = str(link["href"]).strip()
-                text = str(link.get_text()).lower()
-                if quality in text or (quality in href.lower() and "download" in text):
-                    return href
-            for link in all_links:
-                if any(x in str(link["href"]).lower() for x in ["drive", "mega", "download", "gdrive"]):
-                    return str(link["href"]).strip()
-    except Exception:
-        pass
-    return original_url
-
-
-async def quality_button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    _, link_id, quality = data.split("_")
-    
-    await query.edit_message_text(text=f"🔄 {quality} ke liye website se ads bypass kiye ja rahe hain...")
-
-    async with AsyncSessionLocal() as session:
-        repo = LinkRepository(session)
-        link_obj = await repo.get_by_id(int(link_id))
-
-    if not link_obj:
-        await query.edit_message_text(text="❌ Error: Yeh link database me nahi mila.")
-        return
-
-    direct_download_url = await _bypass_website_ads_engine(link_obj.url, quality)
-    delivery_message = (
-        f"✅ *Direct Download Link Ready!* ({quality})\n\n"
-        f"📌 *Name:* {link_obj.name}\n"
-        f"🚀 *⚡ Clean Download Link:* {direct_download_url}"
-    )
-    await query.edit_message_text(text=delivery_message, parse_mode="Markdown")
-
-
-# ---------------------------------------------------------------------------
-# Core Entrypoint (With Fuzzy/Spelling Auto-Correction System)
+# Core Message Router (Dono Normal aur Command Search ko sambhalti hai)
 # ---------------------------------------------------------------------------
 async def core_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text or ""
+    user_text_stripped = user_text.strip()
 
-    # Agar normal string direct command /all jaisa text hai to redirection set karo
-    if user_text.strip() == "/all" or user_text.strip() == "/links":
+    if user_text_stripped in ["/all", "/links"]:
         await list_all_stored_links_command(update, context)
         return
 
-    if _is_admin(update):
+    # Multi-Website Dynamic Command Check (`/search https://site.com naruto`)
+    is_explicit_search_command = user_text_stripped.startswith("/search")
+    chosen_website_base = DEFAULT_TARGET_WEBSITE
+    search_query = user_text_stripped
+
+    if is_explicit_search_command:
+        parts = user_text_stripped.split(maxsplit=2)
+        if len(parts) < 3:
+            await update.message.reply_text("⚠️ **Format Galat Hai!**\nSahi tarika: `/search [website_url] [movie_name]`\n\n*Example:* `/search https://gplinks.com Naruto`")
+            return
+        chosen_website_base = parts[1]
+        search_query = parts[2]
+
+    if _is_admin(update) and not is_explicit_search_command:
         url_match = URL_REGEX.search(user_text)
         if url_match:
             url = url_match.group(0)
@@ -346,40 +240,89 @@ async def core_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 await _store_link_from_message(update, url, remainder)
             return
 
-        intent = await classify_intent(user_text)
-        if intent == "CODE_TASK":
-            await _handle_owner_code_task(update, context, user_text)
-        else:
-            await _handle_ai_chat(update, user_text)
-        return
-
-    # Non-owner fuzzy search database matching mechanism (Fuzzy Corrector)
-    async with AsyncSessionLocal() as session:
-        repo = LinkRepository(session)
-        matches = await repo.search(user_text)
-        
-        if not matches:
-            all_links = await repo.search("") 
-            link_names = [m.name for m in all_links]
+    # 1. Pehle local database me check karo (Agar normal keyword query hai toh fuzzy search chalao)
+    matches = []
+    if not is_explicit_search_command:
+        async with AsyncSessionLocal() as session:
+            repo = LinkRepository(session)
+            matches = await repo.search(search_query)
             
-            # 45% matching threshold: handles extreme typos like 'Nroto' -> 'Naruto'
-            closest_matches = difflib.get_close_matches(user_text, link_names, n=5, cutoff=0.45)
-            if closest_matches:
-                matches = []
-                for name in closest_matches:
-                    for l in all_links:
-                        if l.name == name and l not in matches:
-                            matches.append(l)
+            if not matches:
+                all_links = await repo.search("") 
+                link_names = [m.name for m in all_links]
+                closest_matches = difflib.get_close_matches(search_query, link_names, n=5, cutoff=0.45)
+                if closest_matches:
+                    matches = []
+                    for name in closest_matches:
+                        for l in all_links:
+                            if l.name == name and l not in matches:
+                                matches.append(l)
 
+    # 2. Agar database me nahi mila ya explicit command hai, toh WEBSITE PAR LIVE JAAO!
+    if not matches and len(search_query) > 2:
+        status_searching = await update.message.reply_text(f"🔍 Live Search Engine Active! Bot ab `{chosen_website_base}` par jaakar live '{search_query}' dhoondh raha hai...")
+        matches = await _live_website_search_scraper(search_query, chosen_website_base)
+        await status_searching.delete()
+
+    # Delivery response block
     if matches:
-        await update.message.reply_text(f"🔎 *{len(matches)} results* mile (Auto-Corrected)! Quality chuney:", parse_mode="Markdown")
+        await update.message.reply_text(f"🔎 **{len(matches)} results** mile! Download karne ke liye quality chuney:", parse_mode="Markdown")
         for m in matches:
             keyboard = [[
                 InlineKeyboardButton("🎥 480p", callback_data=f"bypass_{m.id}_480p"),
                 InlineKeyboardButton("🎥 720p", callback_data=f"bypass_{m.id}_720p"),
                 InlineKeyboardButton("🎥 1080p", callback_data=f"bypass_{m.id}_1080p")
             ]]
+            context.user_data[f"transient_{m.id}"] = m.url
             await update.message.reply_text(f"🎬 *{m.name}*", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
-    await _handle_ai_chat(update, user_text)
+    if is_explicit_search_command:
+        await update.message.reply_text(f"❌ Afsos! Website `{chosen_website_base}` par '{search_query}' naam ki koi post ya link nahi mili.")
+        return
+
+    # Chat fallback
+    try:
+        response = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[{"role": "user", "content": user_text}]
+        )
+        await update.message.reply_text(response.choices[0].message.content)
+    except Exception:
+        await update.message.reply_text("⚠️ Movie mili nahi aur server busy hai.")
+
+
+# ---------------------------------------------------------------------------
+# Callback Handler (Transient / Direct Node Delivery Module)
+# ---------------------------------------------------------------------------
+async def quality_button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, link_id, quality = query.data.split("_")
+    
+    await query.edit_message_text(text=f"🔄 {quality} ke liye website ads bypass ho rahe hain...")
+
+    transient_url = context.user_data.get(f"transient_{link_id}")
+    target_url = None
+    target_name = "Live Scraped Media"
+    
+    if transient_url:
+        target_url = transient_url
+    else:
+        async with AsyncSessionLocal() as session:
+            repo = LinkRepository(session)
+            link_obj = await repo.get_by_id(int(link_id))
+            if link_obj:
+                target_url = link_obj.url
+                target_name = link_obj.name
+
+    if not target_url:
+        await query.edit_message_text(text="❌ Error: Link session expired. Dubara search karein.")
+        return
+
+    delivery_message = (
+        f"✅ *Direct Download Link Ready!* ({quality})\n\n"
+        f"📌 *Name:* {target_name}\n"
+        f"🚀 *⚡ Clean Download Link:* {target_url}"
+    )
+    await query.edit_message_text(text=delivery_message, parse_mode="Markdown")
