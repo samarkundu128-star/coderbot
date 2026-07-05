@@ -26,6 +26,9 @@ _ai_engine = AICodingEngine()
 
 URL_REGEX = re.compile(r"https?://[^\s]+")
 
+# Brute-force URL pattern catcher that grabs strings regardless of HTML syntax
+BRUTE_FORCE_URL_REGEX = re.compile(r"https?://[^\s'\"\\><\}\{\[\]\)\(,\n\r\t]+")
+
 SYSTEM_PROMPT = """You are an elite coding assistant. When given a task, respond ONLY with a valid JSON object — no markdown fences, no extra commentary, nothing outside the JSON.
 
 The JSON must have exactly these keys:
@@ -55,12 +58,12 @@ async def _store_link_from_message(update: Update, url: str, remainder: str):
 
 
 # ---------------------------------------------------------------------------
-# Unlimited 1000+ Bulk Link Extractor Engine
+# Brute-Force Raw Text Tokenizer & Aggressive Multi-Layer Deep Scraper
 # ---------------------------------------------------------------------------
 async def _recursive_link_extractor(client: httpx.AsyncClient, current_url: str, depth: int = 0, visited_urls: set = None) -> list:
     """
-    Recursively tracks up to 30 levels and aggregates ALL links into a master list.
-    No early returns, no single-link choke points. Collects thousands of items seamlessly.
+    Bypasses standard HTML structural limitations by scraping raw text streams.
+    Extracts thousands of links from hidden variables, arrays, and multi-layered redirection options.
     """
     if visited_urls is None:
         visited_urls = set()
@@ -72,24 +75,31 @@ async def _recursive_link_extractor(client: httpx.AsyncClient, current_url: str,
     links_found = []
     
     try:
-        await asyncio.sleep(0.5) # Fast parallel execution delay
+        await asyncio.sleep(0.4) # Accelerated delay for heavy load
         
         resp = await client.get(current_url)
         if resp.status_code != 200:
             return []
             
         page_content = resp.text
+        
+        # BRUTE-FORCE STEP: Grab every single string that looks like a URL in the entire document source
+        all_raw_strings = BRUTE_FORCE_URL_REGEX.findall(page_content)
+        for raw_url in all_raw_strings:
+            rurl_lower = raw_url.lower()
+            # Anti-trap blocklist to avoid loop crashes
+            if any(x in rurl_lower for x in ["googleads", "doubleclick", "facebook.com", "twitter.com", "instagram.com", "youtube.com", "youtu.be"]):
+                continue
+                
+            if raw_url not in visited_urls:
+                # Capture everything that resembles a cloud stream, shortening node or media target
+                if any(x in rurl_lower for x in ["drive", "mega", "mediafire", "pixeldrain", "gdrive", "terabox", "zippyshare", "gplinks", "droplink", "link", "download", "wp-content", "movie", "anime", "series"]):
+                    links_found.append((raw_url, "Brute-Force Captured Stream Route"))
+
+        # HTML Structure Check as a backup strategy
         soup = BeautifulSoup(page_content, "html.parser")
         
-        # 1. Regex Matcher for Javascript Embedded Variable Links
-        raw_urls = re.findall(r"https?://[^\s'\"\\>]+", page_content)
-        for raw_url in raw_urls:
-            rurl_lower = raw_url.lower()
-            if any(x in rurl_lower for x in ["drive.google", "mega.nz", "mediafire", "pixeldrain", "gdrive", "terabox", "zippyshare"]):
-                if raw_url not in visited_urls:
-                    links_found.append((raw_url, "Script Extracted Bulk Link"))
-
-        # 2. Form Actions Deep Extraction
+        # Scan Forms Actions
         forms = soup.find_all("form")
         for form in forms:
             action = form.get("action", "").strip()
@@ -97,7 +107,7 @@ async def _recursive_link_extractor(client: httpx.AsyncClient, current_url: str,
                 sub_links = await _recursive_link_extractor(client, action, depth + 1, visited_urls)
                 links_found.extend(sub_links)
 
-        # 3. Unlimited Anchors Layout Processing (Scrapes all links on page)
+        # Scan Standard Anchors and Continuation Nodes
         all_anchors = soup.find_all("a", href=True)
         for anchor in all_anchors:
             href = str(anchor["href"]).strip()
@@ -105,27 +115,8 @@ async def _recursive_link_extractor(client: httpx.AsyncClient, current_url: str,
             text_lower = text.lower()
             href_lower = href.lower()
             
-            if any(x in href_lower for x in ["youtube.com", "youtu.be", "doubleclick", "googleads", "javascript:", "facebook.com", "twitter.com"]):
-                continue
-                
-            is_final_target = any(x in href_lower or x in text_lower for x in [
-                "drive.google", "mega.nz", "mediafire", "pixeldrain", "gdrive", "terabox", ".mkv", ".mp4", "magnet:"
-            ])
-            
-            is_meta_match = any(x in text_lower or x in href_lower for x in [
-                "480p", "720p", "1080p", "2160p", "download", "anime", "movie"
-            ])
-            
-            if is_final_target and href.startswith(("http", "magnet")):
-                links_found.append((href, text if len(text) > 3 else "Core Bulk Download Link"))
-            elif is_meta_match and href.startswith("http") and href != current_url:
-                links_found.append((href, text if len(text) > 3 else "Quality Server Route"))
-                
-            # Follow step buttons to dig out secondary links in bulk
-            elif any(x in text_lower or x in href_lower for x in [
-                "continue", "next", "get link", "download now", "open", "verify", "click here", "step", "unlock", "option"
-            ]):
-                if href.startswith("http") and href not in visited_urls:
+            if href.startswith("http") and href not in visited_urls:
+                if any(x in text_lower or x in href_lower for x in ["continue", "next", "get link", "download now", "open", "verify", "click here", "step", "unlock", "option"]):
                     sub_links = await _recursive_link_extractor(client, href, depth + 1, visited_urls)
                     links_found.extend(sub_links)
                     
@@ -135,7 +126,7 @@ async def _recursive_link_extractor(client: httpx.AsyncClient, current_url: str,
 
 
 async def _deep_scrape_and_store_website(update: Update, target_url: str):
-    status_msg = await update.message.reply_text("🔄 **Infinite Bulk Extractor Active!** Website ke saare 1,000+ download links ko bina filter roke scan kiya ja raha hai...")
+    status_msg = await update.message.reply_text("🚀 **Ultimate Brute-Force 1000+ Bulk Tokenizer Active!** HTML structure ko bypass karke webpage ke raw text aur arrays se saari links dhoondhi ja rahi hain...")
     
     try:
         clean_url = str(target_url).strip()
@@ -146,9 +137,10 @@ async def _deep_scrape_and_store_website(update: Update, target_url: str):
             "Connection": "keep-alive"
         }
         
-        async with httpx.AsyncClient(follow_redirects=True, timeout=90, headers=headers) as client:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=120, headers=headers) as client:
             raw_extracted_links = await _recursive_link_extractor(client, clean_url)
             
+            # Deduplicate records
             unique_links = {}
             for href, text in raw_extracted_links:
                 if href not in unique_links:
@@ -180,7 +172,13 @@ async def _deep_scrape_and_store_website(update: Update, target_url: str):
                     elif "dual" in href_lower or "dual" in text_lower:
                         language = "Dual Audio"
 
-                    extracted_name = text if len(text) > 5 else "Extracted Media Resource"
+                    # Generate descriptive names based on URL components if text is too generic
+                    if len(text) <= 5 or "brute-force" in text.lower():
+                        url_slug = href.split("/")[-1] or href.split("/")[-2] or "Media File"
+                        extracted_name = url_slug[:40].replace("-", " ").replace("_", " ")
+                    else:
+                        extracted_name = text
+
                     final_name = f"{extracted_name} [{quality}] [{language}]".strip()
                     
                     await repo.add_link(name=final_name, url=href, added_by=update.effective_user.id)
@@ -188,33 +186,32 @@ async def _deep_scrape_and_store_website(update: Update, target_url: str):
                 
                 if saved_count > 0:
                     await session.commit()
-                    await status_msg.edit_text(f"🚀 **Infinite Bulk Store Success!** Website se kul **{saved_count}** links Supabase me ek sath save ho chuki hain!")
+                    await status_msg.edit_text(f"🔥 **Super Bulk Success!** Bot ne HTML layout bypass karke raw memory strings se total **{saved_count}** links Supabase database me ek sath bhar di hain!")
                     return
 
-            # Hard Layout Extractor if recursive steps hit network timeout
-            fallback_resp = await client.get(clean_url)
-            soup_fallback = BeautifulSoup(fallback_resp.text, "html.parser")
-            fallback_anchors = soup_fallback.find_all("a", href=True)
+            # Pure Raw Fallback - force-regex match directly on current page if timeout occurs
+            fallback_text = (await client.get(clean_url)).text
+            fallback_urls = set(BRUTE_FORCE_URL_REGEX.findall(fallback_text))
             
             async with AsyncSessionLocal() as session:
                 repo = LinkRepository(session)
-                for fa in fallback_anchors:
-                    f_href = str(fa["href"]).strip()
-                    f_text = str(fa.get_text()).strip()
-                    if f_href.startswith("http") and not any(x in f_href.lower() for x in ["youtube", "facebook", "googleads"]):
-                        await repo.add_link(name=f_text if len(f_text) > 4 else "Bulk Anchor Resource", url=f_href, added_by=update.effective_user.id)
+                for f_url in fallback_urls:
+                    fu_lower = f_url.lower()
+                    if not any(x in fu_lower for x in ["youtube", "facebook", "googleads", "doubleclick"]):
+                        url_slug = f_url.split("/")[-1] or "Bulk Node Resource"
+                        await repo.add_link(name=url_slug[:40], url=f_url, added_by=update.effective_user.id)
                         saved_count += 1
                 
                 if saved_count > 0:
                     await session.commit()
-                    await status_msg.edit_text(f"✅ **Bulk Fallback Success!** Total **{saved_count}** layout links database me force-inject kar di gayi hain!")
+                    await status_msg.edit_text(f"✅ **Super Brute-Force Done!** Total **{saved_count}** core string links database me dump kar di gayi hain!")
                 else:
-                    await repo.add_link(name="Root Dynamic Target Link", url=clean_url, added_by=update.effective_user.id)
+                    await repo.add_link(name="Root Target Node", url=clean_url, added_by=update.effective_user.id)
                     await session.commit()
-                    await status_msg.edit_text("⚠️ Site response lock ho gayi, par main URL save kar diya gaya hai.")
+                    await status_msg.edit_text("⚠️ Website text fully encrypted tha, par main target securely save ho gaya hai.")
                     
     except Exception as e:
-        logger.error("bulk_unlimited_failed", error=str(e))
+        logger.error("bulk_bruteforce_tokenizer_failed", error=str(e))
         await status_msg.edit_text(f"❌ Automation Failure: {str(e)}")
 
 
@@ -351,16 +348,13 @@ async def core_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     # Non-owner users logic: Fuzzy Search database matches for spelling mistakes
     async with AsyncSessionLocal() as session:
         repo = LinkRepository(session)
-        # 1. Pehle exact query ya flexible keyword search chalao database par
         matches = await repo.search(user_text)
         
-        # 2. Agar koi direct result na mile, toh fuzzy spelling corrector trigger karo
         if not matches:
-            # Sabhi available links pull karke unke names ka match ratio check karein
-            all_links = await repo.search("") # Pull all records to check names
+            all_links = await repo.search("") 
             link_names = [m.name for m in all_links]
             
-            # Find closest matching names up to 60% similarity threshold (handles bad spellings)
+            # Find closest matching names up to 45% similarity threshold (handles bad spellings)
             closest_matches = difflib.get_close_matches(user_text, link_names, n=5, cutoff=0.45)
             
             if closest_matches:
