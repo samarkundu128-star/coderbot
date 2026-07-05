@@ -2,6 +2,7 @@ import re
 import json
 import asyncio
 import difflib
+import base64
 import urllib.parse
 import structlog
 import httpx
@@ -27,43 +28,74 @@ _ai_engine = AICodingEngine()
 
 URL_REGEX = re.compile(r"https?://[^\s]+")
 BRUTE_FORCE_URL_REGEX = re.compile(r"https?://[^\s'\"\\><\}\{\[\]\)\(,\n\r\t]+")
+BASE64_REGEX = re.compile(r'(?:[A-Za-z0-9+/]{4}){3,}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?')
 
 DEFAULT_TARGET_WEBSITE = "https://gplinks.com" 
 
-# Highly realistic browser fingerprint headers to bypass Cloudflare/WAF blockades
-STABLE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Cache-Control": "max-age=0",
-    "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"Windows"',
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-    "Upgrade-Insecure-Requests": "1"
-}
-
-
-def _is_admin(update: Update) -> bool:
-    return update.effective_user is not None and update.effective_user.id == settings.ADMIN_TELEGRAM_ID
-
-
-async def _store_link_from_message(update: Update, url: str, remainder: str):
-    name = remainder if remainder else f"Link ({url[:30]}...)"
-    async with AsyncSessionLocal() as session:
-        repo = LinkRepository(session)
-        await repo.add_link(name=name, url=url, added_by=update.effective_user.id)
-        await session.commit()
-    await update.message.reply_text(f"✅ **Saved Link:**\n📝 *Name:* {name}\n🔗 *URL:* {url}", parse_mode="Markdown")
-
+# ---------------------------------------------------------------------------
+# NETWORK CONFIGURATION: 4 OPTIMAL ALTERNATE FINGERPRINTS
+# ---------------------------------------------------------------------------
+HEADERS_POOL = [
+    # System 1: Standard Desktop Chrome
+    {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Connection": "keep-alive"
+    },
+    # System 2: Modern Mobile iOS Safari (Bypasses basic script-blockers)
+    {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-GB,en;q=0.9"
+    },
+    # System 3: High-Compatibility Firefox
+    {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+    },
+    # System 4: Cloudflare Simulation Fingerprint
+    {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"macOS"',
+        "Upgrade-Insecure-Requests": "1"
+    }
+]
 
 # ---------------------------------------------------------------------------
-# Brute-Force Link Extractor (With Heavy Security Headers)
+# DATA LAYER: MULTI-SYSTEM EXTRACTOR & HYBRID DECODER
 # ---------------------------------------------------------------------------
+def _multi_layer_decoder(raw_text: str) -> list:
+    """
+    3 Alternate Data Decoders working one after another inside every page.
+    """
+    extracted_urls = []
+    
+    # System 1: Plain Text Scanner
+    plain_matches = BRUTE_FORCE_URL_REGEX.findall(raw_text)
+    extracted_urls.extend(plain_matches)
+    
+    # System 2: Base64 Obfuscated String Decryption
+    b64_blocks = BASE64_REGEX.findall(raw_text)
+    for block in b64_blocks:
+        if len(block) > 20:
+            try:
+                decoded = base64.b64decode(block).decode('utf-8', errors='ignore')
+                if "http" in decoded:
+                    extracted_urls.extend(BRUTE_FORCE_URL_REGEX.findall(decoded))
+            except Exception:
+                pass
+                
+    # System 3: JS Window Target Location Parsing
+    js_locations = re.findall(r"(?:location\.href|window\.open)\s*=\s*['\"]([^'\"]+)['\"]", raw_text)
+    for loc in js_locations:
+        if loc.startswith("http"):
+            extracted_urls.append(loc)
+            
+    return extracted_urls
+
+
 async def _recursive_link_extractor(client: httpx.AsyncClient, current_url: str, depth: int = 0, visited_urls: set = None) -> list:
     if visited_urls is None:
         visited_urls = set()
@@ -74,66 +106,83 @@ async def _recursive_link_extractor(client: httpx.AsyncClient, current_url: str,
     visited_urls.add(current_url)
     links_found = []
     
-    try:
-        await asyncio.sleep(0.5)
-        resp = await client.get(current_url, timeout=20.0)
-        if resp.status_code != 200:
-            return []
+    # NETWORK STEP: Try hitting the url with 4 alternate configurations sequentially on block
+    response_text = ""
+    for idx, headers in enumerate(HEADERS_POOL, start=1):
+        try:
+            await asyncio.sleep(0.5)
+            resp = await client.get(current_url, timeout=15.0, headers=headers)
+            if resp.status_code == 200:
+                response_text = resp.text
+                break # System succeeded, exit fallback loop
+        except Exception as e:
+            logger.debug(f"Network configuration system {idx} failed, switching to fallback...")
+            continue
             
-        page_content = resp.text
-        all_raw_strings = BRUTE_FORCE_URL_REGEX.findall(page_content)
-        for raw_url in all_raw_strings:
-            rurl_lower = raw_url.lower()
-            if any(x in rurl_lower for x in ["googleads", "doubleclick", "facebook.com", "twitter.com", "instagram.com", "youtube.com", "youtu.be"]):
-                continue
-                
-            if raw_url not in visited_urls:
-                if any(x in rurl_lower for x in ["drive", "mega", "mediafire", "pixeldrain", "gdrive", "terabox", "zippyshare", "gplinks", "droplink", "link", "download", "movie", "anime", "series"]):
-                    links_found.append((raw_url, "Stream Route"))
+    if not response_text:
+        return []
+        
+    # DECODING STEP: Process text using hybrid systems
+    all_raw_strings = _multi_layer_decoder(response_text)
 
-        soup = BeautifulSoup(page_content, "html.parser")
-        all_anchors = soup.find_all("a", href=True)
-        for anchor in all_anchors:
-            href = str(anchor["href"]).strip()
-            text = str(anchor.get_text()).strip().lower()
-            if href.startswith("http") and href not in visited_urls:
-                if any(x in text or x in href.lower() for x in ["continue", "next", "get link", "download now", "open", "verify", "click here", "step", "unlock", "option"]):
-                    sub_links = await _recursive_link_extractor(client, href, depth + 1, visited_urls)
-                    links_found.extend(sub_links)
-                    
-    except Exception as e:
-        logger.debug("extractor_exception", url=current_url, error=str(e))
+    for raw_url in all_raw_strings:
+        rurl_lower = raw_url.lower()
+        if any(x in rurl_lower for x in ["googleads", "doubleclick", "facebook.com", "twitter.com", "instagram.com", "youtube.com", "youtu.be"]):
+            continue
+            
+        if raw_url not in visited_urls:
+            if any(x in rurl_lower for x in ["drive", "mega", "mediafire", "pixeldrain", "gdrive", "terabox", "zippyshare", "gplinks", "droplink", "link", "download", "movie", "anime", "series"]):
+                links_found.append((raw_url, "Stream Route"))
+
+    soup = BeautifulSoup(response_text, "html.parser")
+    all_anchors = soup.find_all("a", href=True)
+    for anchor in all_anchors:
+        href = str(anchor["href"]).strip()
+        text = str(anchor.get_text()).strip().lower()
+        if href.startswith("http") and href not in visited_urls:
+            if any(x in text or x in href.lower() for x in ["continue", "next", "get link", "download now", "open", "verify", "click here", "step", "unlock", "option"]):
+                sub_links = await _recursive_link_extractor(client, href, depth + 1, visited_urls)
+                links_found.extend(sub_links)
+                
     return links_found
 
 
 # ---------------------------------------------------------------------------
-# SEO-FRIENDLY SMART URL KEYWORD SCRAPER ENGINE
+# CORE SYSTEM: 4-LAYER SEARCH STRUCTURE CRAWLER
 # ---------------------------------------------------------------------------
 async def _live_website_search_scraper(query_text: str, target_base_url: str) -> tuple[list, str]:
     results = []
     clean_base = target_base_url.rstrip("/")
     search_keywords = query_text.lower().replace(" ", "-")
+    
+    # 4 Dynamic Search Systems triggered back-to-back if previous draws a blank
     url_patterns = [
-        f"{clean_base}/{search_keywords}/",      
-        f"{clean_base}/?s={urllib.parse.quote_plus(query_text)}", 
-        clean_base                                
+        {"url": f"{clean_base}/{search_keywords}/", "system_name": "SEO Slug Matcher"},
+        {"url": f"{clean_base}/?s={urllib.parse.quote_plus(query_text)}", "system_name": "Standard Query Engine"},
+        {"url": f"{clean_base}/search/{urllib.parse.quote_plus(query_text)}", "system_name": "Global Path Router"},
+        {"url": clean_base, "system_name": "Index DOM Mapping Falling Edge"}
     ]
     
-    try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=30.0, headers=STABLE_HEADERS) as client:
-            candidate_urls = set()
-            
-            for current_target in url_patterns:
-                try:
-                    resp = await client.get(current_target)
+    candidate_urls = set()
+    
+    # Executing each system sequentially as alternate fallbacks
+    for pattern in url_patterns:
+        current_url = pattern["url"]
+        logger.info(f"Triggering {pattern['system_name']} for query: '{query_text}'")
+        
+        # Test headers configurations inside search loops too
+        for config_headers in HEADERS_POOL[:2]: 
+            try:
+                async with httpx.AsyncClient(follow_redirects=True, timeout=25.0, headers=config_headers) as client:
+                    resp = await client.get(current_url)
                     if resp.status_code != 200:
                         continue
                         
                     soup = BeautifulSoup(resp.text, "html.parser")
                     anchors = soup.find_all("a", href=True)
                     
-                    if search_keywords in current_target and len(anchors) > 5:
-                        candidate_urls.add((current_target, query_text.title()))
+                    if search_keywords in current_url and len(anchors) > 5:
+                        candidate_urls.add((current_url, query_text.title()))
                     
                     for a in anchors:
                         href = str(a["href"]).strip()
@@ -141,16 +190,25 @@ async def _live_website_search_scraper(query_text: str, target_base_url: str) ->
                         if query_text.lower() in text.lower() or search_keywords in href.lower():
                             if href.startswith("http") and clean_base in href:
                                 candidate_urls.add((href, text if len(text) > 4 else query_text.title()))
-                except Exception:
-                    continue
-            
-            if not candidate_urls:
-                return [], f"🔍 Website par '{query_text}' ki koi direct post ya page match nahi mila."
+                                
+                    # If any anchor links secured from this system, skip remaining patterns to save server load
+                    if candidate_urls:
+                        break
+            except Exception:
+                continue
+        if candidate_urls:
+            break
 
+    if not candidate_urls:
+        return [], f"❌ **All 4 Search Systems Exhausted!** Target website par '{query_text}' ke patterns match nahi huye."
+
+    # Final Stage Extraction with adaptive client configurations
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=35.0, headers=HEADERS_POOL[0]) as client:
             for page_url, title in list(candidate_urls)[:4]:
                 raw_extracted = await _recursive_link_extractor(client, page_url)
                 for href, _ in raw_extracted:
-                    url_slug = href.split("/")[-1] or "Media Target Node"
+                    url_slug = href.split("/")[-1] or "Target Node"
                     clean_title = f"{title} - {url_slug[:25]}".replace("-", " ").replace("_", " ")
                     
                     class MockLinkItem:
@@ -161,37 +219,46 @@ async def _live_website_search_scraper(query_text: str, target_base_url: str) ->
                             
                     mock_id = abs(hash(href)) % 1000000
                     results.append(MockLinkItem(clean_title, href, mock_id))
-                    
     except Exception as e:
-        logger.error("seo_crawling_failed", error=str(e))
-        return [], f"❌ Crawling Error: {str(e)}"
+        return [], f"❌ Pipeline Extraction Error: {str(e)}"
         
     return results, "SUCCESS"
 
 
+# ---------------------------------------------------------------------------
+# DATABASE TRANSACTION BATCHING SYSTEM
+# ---------------------------------------------------------------------------
 async def _deep_scrape_and_store_website(update: Update, target_url: str):
-    status_msg = await update.message.reply_text("🚀 **URL Extraction Active!** Bot is webpage ko deeply analyze kar raha hai...")
+    status_msg = await update.message.reply_text("🚀 **Resilient Extraction Active!** Page analyze kiya ja raha hai...")
     try:
         clean_url = str(target_url).strip()
-        async with httpx.AsyncClient(follow_redirects=True, timeout=45.0, headers=STABLE_HEADERS) as client:
+        # Initializing client with standard header
+        async with httpx.AsyncClient(follow_redirects=True, timeout=45.0, headers=HEADERS_POOL[0]) as client:
             raw_extracted_links = await _recursive_link_extractor(client, clean_url)
             unique_links = {href: text for href, text in raw_extracted_links}
             
             saved_count = 0
+            # Database Transaction Layer: Sequenced Commit Fallback Matrix
             async with AsyncSessionLocal() as session:
                 repo = LinkRepository(session)
                 for href, text in unique_links.items():
                     url_slug = href.split("/")[-1] or "Media File"
                     final_name = text if len(text) > 5 else url_slug[:40]
-                    await repo.add_link(name=final_name, url=href, added_by=update.effective_user.id)
-                    saved_count += 1
+                    
+                    # Try System: Store data one-by-one safely
+                    try:
+                        await repo.add_link(name=final_name, url=href, added_by=update.effective_user.id)
+                        saved_count += 1
+                    except Exception:
+                        continue # If single duplicate or type error occurs, skip and save remaining array node elements
+                        
                 if saved_count > 0:
                     await session.commit()
-                    await status_msg.edit_text(f"🔥 **Extraction Success!** Total **{saved_count}** core links successfully Supabase me store kar di gayi hain!")
+                    await status_msg.edit_text(f"🔥 **Extraction Success!** Total **{saved_count}** core media links successfully saved to database!")
                     return
-            await status_msg.edit_text("⚠️ Is webpage par brute-force tokenizer ko koi download link nahi mili. Ya toh page security se protected hai ya links hidden hain.")
+            await status_msg.edit_text("⚠️ Extraction Failed: Is page par crawler ko koi media download path detect nahi hua.")
     except Exception as e:
-        await status_msg.edit_text(f"❌ Automation Connection Error: {str(e)}")
+        await status_msg.edit_text(f"❌ Automation Timeout Error: {str(e)}")
 
 
 async def list_all_stored_links_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -208,7 +275,7 @@ async def list_all_stored_links_command(update: Update, context: ContextTypes.DE
 
 
 # ---------------------------------------------------------------------------
-# Core Message Router
+# CORE MESSAGE ROUTER
 # ---------------------------------------------------------------------------
 async def core_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text or ""
@@ -230,14 +297,14 @@ async def core_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         chosen_website_base = parts[1]
         search_query = parts[2]
 
-    # CHECK: Captures direct URLs for instant global scanning bypassing strict admin validations
+    # Universal Capture: Process direct URL strings instantly
     url_match = URL_REGEX.search(user_text)
     if url_match and not is_explicit_search_command:
         url = url_match.group(0)
         await _deep_scrape_and_store_website(update, url)
         return
 
-    # 1. Database Check
+    # SYSTEM 1: Local Database Exact/Fuzzy Matching
     matches = []
     if not is_explicit_search_command:
         async with AsyncSessionLocal() as session:
@@ -255,14 +322,14 @@ async def core_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                             if l.name == name and l not in matches:
                                 matches.append(l)
 
-    # 2. Live Scraper
+    # SYSTEM 2: Multi-Layer Live Web Crawler
     status_msg_text = ""
     if not matches and len(search_query) > 2:
-        status_searching = await update.message.reply_text(f"🔍 Network Engine Active! Bot `{chosen_website_base}` par bypass simulation run kar raha hai...")
+        status_searching = await update.message.reply_text(f"🔍 Security Sandbox Active! Bot `{chosen_website_base}` par sequential bypass protocols try kar raha hai...")
         matches, status_msg_text = await _live_website_search_scraper(search_query, chosen_website_base)
         await status_searching.delete()
 
-    # UI Rendering
+    # UI Interactive Buttons Delivery
     if matches:
         await update.message.reply_text(f"🔎 **{len(matches)} results** mile! Quality chuney:", parse_mode="Markdown")
         for m in matches:
@@ -279,6 +346,7 @@ async def core_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(status_msg_text, parse_mode="Markdown")
         return
 
+    # SYSTEM 3: AI Chat Inference Fallback
     try:
         response = groq_client.chat.completions.create(
             model=GROQ_MODEL,
@@ -286,11 +354,11 @@ async def core_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         await update.message.reply_text(response.choices[0].message.content)
     except Exception:
-        await update.message.reply_text("⚠️ Engine Timeout.")
+        await update.message.reply_text("⚠️ System Fallback: Service under high load. Correct format name query.")
 
 
 # ---------------------------------------------------------------------------
-# Callback Handler
+# Callback Quality Router
 # ---------------------------------------------------------------------------
 async def quality_button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -301,7 +369,7 @@ async def quality_button_callback_handler(update: Update, context: ContextTypes.
 
     transient_url = context.user_data.get(f"transient_{link_id}")
     target_url = None
-    target_name = "Live Scraped Media"
+    target_name = "Live Scraped Media Node"
     
     if transient_url:
         target_url = transient_url
@@ -314,7 +382,7 @@ async def quality_button_callback_handler(update: Update, context: ContextTypes.
                 target_name = link_obj.name
 
     if not target_url:
-        await query.edit_message_text(text="❌ Error: Session expired.")
+        await query.edit_message_text(text="❌ Error: Cache cleared. Please re-search.")
         return
 
     delivery_message = (
