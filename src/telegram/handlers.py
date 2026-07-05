@@ -28,7 +28,7 @@ _ai_engine = AICodingEngine()
 URL_REGEX = re.compile(r"https?://[^\s]+")
 BRUTE_FORCE_URL_REGEX = re.compile(r"https?://[^\s'\"\\><\}\{\[\]\)\(,\n\r\t]+")
 
-# ⚠️ DEFAULT TARGET WEBSITE
+# ⚠️ APNI DEFAULT WEBSITE KA URL YAHA SET KAREIN
 DEFAULT_TARGET_WEBSITE = "https://gplinks.com" 
 
 SYSTEM_PROMPT = """You are an elite coding assistant. When given a task, respond ONLY with a valid JSON object — no markdown fences, no extra commentary, nothing outside the JSON.
@@ -58,7 +58,7 @@ async def _store_link_from_message(update: Update, url: str, remainder: str):
 
 
 # ---------------------------------------------------------------------------
-# Brute-Force Raw Text Tokenizer (With Enhanced Error Resiliency)
+# Brute-Force Raw Text Tokenizer
 # ---------------------------------------------------------------------------
 async def _recursive_link_extractor(client: httpx.AsyncClient, current_url: str, depth: int = 0, visited_urls: set = None) -> list:
     if visited_urls is None:
@@ -71,7 +71,7 @@ async def _recursive_link_extractor(client: httpx.AsyncClient, current_url: str,
     links_found = []
     
     try:
-        await asyncio.sleep(0.4) # Polite delay to avoid instant rate limiting
+        await asyncio.sleep(0.4)
         resp = await client.get(current_url, timeout=15.0)
         if resp.status_code != 200:
             return []
@@ -104,59 +104,64 @@ async def _recursive_link_extractor(client: httpx.AsyncClient, current_url: str,
 
 
 # ---------------------------------------------------------------------------
-# STABLE LIVE WEBSITE SEARCH SCRAPER ENGINE
+# SEO-FRIENDLY SMART URL KEYWORD SCRAPER ENGINE (Fixed For Custom Permalinks)
 # ---------------------------------------------------------------------------
 async def _live_website_search_scraper(query_text: str, target_base_url: str) -> tuple[list, str]:
-    """
-    Returns a tuple: (results_list, error_or_status_message)
-    """
     results = []
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
         "Connection": "keep-alive"
     }
     
     clean_base = target_base_url.rstrip("/")
-    encoded_query = urllib.parse.quote_plus(query_text)
-    search_url = f"{clean_base}/?s={encoded_query}"
+    
+    # Hum 3 patterns test karenge: Slug search, parameter search aur homepage index tracking
+    search_keywords = query_text.lower().replace(" ", "-")
+    url_patterns = [
+        f"{clean_base}/{search_keywords}/",      # Aapka bataya hua pattern (SEO Slug format)
+        f"{clean_base}/?s={urllib.parse.quote_plus(query_text)}", # WordPress fallback
+        clean_base                                # Direct Homepage Scan fallback
+    ]
     
     try:
-        # Increased timeouts to 35 seconds to sustain heavy cloud protection delays
-        async with httpx.AsyncClient(follow_redirects=True, timeout=35.0, headers=headers) as client:
-            try:
-                resp = await client.get(search_url)
-            except httpx.TimeoutException:
-                return [], f"⚠️ Target website (`{clean_base}`) ne response dene me bohot time lagaya (Timeout). Site shayad down hai ya slow hai."
-            except httpx.NetworkError:
-                return [], "⚠️ Network error! Website URL galat hai ya bot connect nahi kar paa raha."
-
-            if resp.status_code == 403 or resp.status_code == 429:
-                return [], f"🚫 Website ne Bot ko block kar diya (Status Code: {resp.status_code}). Site par Cloudflare ya Anti-Bot Protection active hai."
-                
-            if resp.status_code != 200:
-                return [], f"⚠️ Website se sahi response nahi mila (Status Code: {resp.status_code})."
-                
-            soup = BeautifulSoup(resp.text, "html.parser")
-            anchors = soup.find_all("a", href=True)
+        async with httpx.AsyncClient(follow_redirects=True, timeout=30.0, headers=headers) as client:
             candidate_urls = set()
             
-            for a in anchors:
-                href = str(a["href"]).strip()
-                text = str(a.get_text()).strip()
-                
-                if query_text.lower() in text.lower() or query_text.lower() in href.lower():
-                    if href.startswith("http") and clean_base in href:
-                        candidate_urls.add((href, text if len(text) > 4 else query_text))
+            # Loop through patterns until we secure matches
+            for current_target in url_patterns:
+                try:
+                    resp = await client.get(current_target)
+                    if resp.status_code != 200:
+                        continue
+                        
+                    soup = BeautifulSoup(resp.text, "html.parser")
+                    anchors = soup.find_all("a", href=True)
+                    
+                    # Agar hum direct target slug par hain aur page directly khul gaya
+                    if search_keywords in current_target and len(anchors) > 5:
+                        candidate_urls.add((current_target, query_text.title()))
+                    
+                    # HTML structural page tracking
+                    for a in anchors:
+                        href = str(a["href"]).strip()
+                        text = str(a.get_text()).strip()
+                        
+                        # Match keyword anywhere in URL structure or text string
+                        if query_text.lower() in text.lower() or search_keywords in href.lower():
+                            if href.startswith("http") and clean_base in href:
+                                candidate_urls.add((href, text if len(text) > 4 else query_text.title()))
+                except Exception:
+                    continue
             
             if not candidate_urls:
-                return [], f"🔍 Website par '{query_text}' naam se koi post ya page nahi mila."
+                return [], f"🔍 Website par '{query_text}' ki koi direct post match nahi mili."
 
-            for page_url, title in list(candidate_urls)[:3]:
+            # Deep Brute-Force extract links from matched structural page nodes
+            for page_url, title in list(candidate_urls)[:4]:
                 raw_extracted = await _recursive_link_extractor(client, page_url)
                 for href, _ in raw_extracted:
-                    url_slug = href.split("/")[-1] or "Media Target Node"
+                    url_slug = href.split("/")[-1] or "Stream Target Node"
                     clean_title = f"{title} - {url_slug[:25]}".replace("-", " ").replace("_", " ")
                     
                     class MockLinkItem:
@@ -169,8 +174,8 @@ async def _live_website_search_scraper(query_text: str, target_base_url: str) ->
                     results.append(MockLinkItem(clean_title, href, mock_id))
                     
     except Exception as e:
-        logger.error("live_dynamic_search_failed", error=str(e))
-        return [], f"❌ Internal system error occurred during live crawling: {str(e)}"
+        logger.error("seo_crawling_failed", error=str(e))
+        return [], f"❌ Crawling Error: {str(e)}"
         
     return results, "SUCCESS"
 
@@ -217,7 +222,7 @@ async def list_all_stored_links_command(update: Update, context: ContextTypes.DE
 
 
 # ---------------------------------------------------------------------------
-# Core Message Router (Dono Normal aur Command Search ko sambhalti hai)
+# Core Message Router
 # ---------------------------------------------------------------------------
 async def core_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text or ""
@@ -234,7 +239,7 @@ async def core_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if is_explicit_search_command:
         parts = user_text_stripped.split(maxsplit=2)
         if len(parts) < 3:
-            await update.message.reply_text("⚠️ **Format Galat Hai!**\nSahi tarika: `/search [website_url] [movie_name]`\n\n*Example:* `/search https://gplinks.com Naruto`")
+            await update.message.reply_text("⚠️ **Format Galat hai!**\nSahi tarika: `/search [website_url] [movie_name]`")
             return
         chosen_website_base = parts[1]
         search_query = parts[2]
@@ -250,7 +255,7 @@ async def core_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 await _store_link_from_message(update, url, remainder)
             return
 
-    # 1. Pehle local database me check karo
+    # 1. Database Check
     matches = []
     if not is_explicit_search_command:
         async with AsyncSessionLocal() as session:
@@ -268,16 +273,16 @@ async def core_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                             if l.name == name and l not in matches:
                                 matches.append(l)
 
-    # 2. Agar database me nahi mila ya explicit command hai, toh WEBSITE PAR LIVE JAAO!
+    # 2. SEO-Friendly Smart Live Crawler
     status_msg_text = ""
     if not matches and len(search_query) > 2:
-        status_searching = await update.message.reply_text(f"🔍 Live Search Engine Active! Bot ab `{chosen_website_base}` par jaakar live '{search_query}' dhoondh raha hai, thoda waqt lag sakta hai...")
+        status_searching = await update.message.reply_text(f"🔍 SEO Permalinks Tracker Active! Bot ab `{chosen_website_base}` par multi-patterns check kar raha hai...")
         matches, status_msg_text = await _live_website_search_scraper(search_query, chosen_website_base)
         await status_searching.delete()
 
-    # Delivery response block
+    # UI Rendering
     if matches:
-        await update.message.reply_text(f"🔎 **{len(matches)} results** mile! Download karne ke liye quality chuney:", parse_mode="Markdown")
+        await update.message.reply_text(f"🔎 **{len(matches)} results** mile! Download quality chuney:", parse_mode="Markdown")
         for m in matches:
             keyboard = [[
                 InlineKeyboardButton("🎥 480p", callback_data=f"bypass_{m.id}_480p"),
@@ -288,16 +293,10 @@ async def core_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(f"🎬 *{m.name}*", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
-    # Agar website search se koi error message aaya hai toh use directly user ko dikhayein
     if status_msg_text and status_msg_text != "SUCCESS":
         await update.message.reply_text(status_msg_text, parse_mode="Markdown")
         return
 
-    if is_explicit_search_command:
-        await update.message.reply_text(f"❌ Website `{chosen_website_base}` par '{search_query}' naam ki koi post nahi mili.")
-        return
-
-    # Groq AI chat fallback
     try:
         response = groq_client.chat.completions.create(
             model=GROQ_MODEL,
@@ -305,11 +304,11 @@ async def core_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         await update.message.reply_text(response.choices[0].message.content)
     except Exception:
-        await update.message.reply_text("⚠️ Movie database/site par nahi mili aur AI engine busy hai. Sahi naam likhein.")
+        await update.message.reply_text("⚠️ Movie mili nahi.")
 
 
 # ---------------------------------------------------------------------------
-# Callback Handler (Transient / Direct Node Delivery Module)
+# Callback Handler
 # ---------------------------------------------------------------------------
 async def quality_button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -333,7 +332,7 @@ async def quality_button_callback_handler(update: Update, context: ContextTypes.
                 target_name = link_obj.name
 
     if not target_url:
-        await query.edit_message_text(text="❌ Error: Link session expired. Dubara search karein.")
+        await query.edit_message_text(text="❌ Error: Session expired.")
         return
 
     delivery_message = (
